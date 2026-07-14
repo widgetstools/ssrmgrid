@@ -100,10 +100,10 @@ export default function App() {
   return (
     <div
       style={{
+        position: "fixed",
+        inset: 0,
         display: "flex",
         flexDirection: "column",
-        height: "100vh",
-        margin: 0,
         background: "#1b1b1b",
         color: "#e6e8ec",
       }}
