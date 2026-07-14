@@ -564,6 +564,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       <div style={{ height: props.height ?? "100%", width: "100%" }}>
         <AgGridReact
           theme={theme}
+          loadThemeGoogleFonts
           columnDefs={override.agGridColumnDefs}
           defaultColDef={defaultColDef}
           autoGroupColumnDef={autoGroupColumnDef}
