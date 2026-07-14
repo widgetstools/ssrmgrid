@@ -98,19 +98,29 @@ export default function App() {
   }, [rate]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", margin: 0 }}>
+    <div
+      data-ag-theme-mode="dark"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        margin: 0,
+        background: "#141a22",
+        color: "#e6e8ec",
+      }}
+    >
       <header
         style={{
           display: "flex",
           alignItems: "center",
           gap: 16,
           padding: "8px 16px",
-          borderBottom: "1px solid #ddd",
+          borderBottom: "1px solid #2a3543",
           font: "13px Inter, system-ui, sans-serif",
         }}
       >
         <strong>&lt;SSRMGrid&gt;</strong>
-        <span style={{ color: "#666" }}>
+        <span style={{ color: "#9aa4b0" }}>
           AG Grid Enterprise (SSRM) · Perspective · {ROW_COUNT.toLocaleString()} rows, all ticking
         </span>
         <input
@@ -118,7 +128,15 @@ export default function App() {
           placeholder="Quick filter…"
           value={quickFilter}
           onChange={(e) => setQuickFilter(e.target.value)}
-          style={{ padding: "4px 8px", font: "13px Inter, system-ui", width: 160 }}
+          style={{
+            padding: "4px 8px",
+            font: "13px Inter, system-ui",
+            width: 160,
+            background: "#1f2836",
+            color: "#e6e8ec",
+            border: "1px solid #2a3543",
+            borderRadius: 3,
+          }}
         />
         <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           Tick rate: <strong>{rate.toLocaleString()}</strong> rows/s
@@ -131,7 +149,7 @@ export default function App() {
             onChange={(e) => setRate(Number(e.target.value))}
           />
         </label>
-        <span style={{ color: "#333", minWidth: 260, textAlign: "right" }}>{totals}</span>
+        <span style={{ color: "#9aa4b0", minWidth: 260, textAlign: "right" }}>{totals}</span>
       </header>
       <div style={{ flex: 1, minHeight: 0 }}>
         <SSRMGrid
