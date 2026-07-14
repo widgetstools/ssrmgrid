@@ -42,20 +42,31 @@ const DATASET = "main";
  * stashes in grid context (`filteredRowCount`) on every totals refresh.
  */
 function ServerRowCountStatusPanel({ api }: CustomStatusPanelProps) {
-  const [count, setCount] = useState<number | null>(null);
+  const [counts, setCounts] = useState<{
+    total: number | null;
+    filtered: number | null;
+  }>({ total: null, filtered: null });
   useEffect(() => {
     const read = () => {
       const ctx = api.getGridOption("context") as
-        | { filteredRowCount?: number }
+        | { totalRowCount?: number; filteredRowCount?: number }
         | undefined;
-      setCount(
-        typeof ctx?.filteredRowCount === "number" ? ctx.filteredRowCount : null,
-      );
+      setCounts({
+        total: typeof ctx?.totalRowCount === "number" ? ctx.totalRowCount : null,
+        filtered:
+          typeof ctx?.filteredRowCount === "number"
+            ? ctx.filteredRowCount
+            : null,
+      });
     };
     read();
     api.addEventListener("modelUpdated", read);
     return () => api.removeEventListener("modelUpdated", read);
   }, [api]);
+
+  const { total, filtered } = counts;
+  const isFiltered =
+    total != null && filtered != null && filtered !== total;
   return (
     <span
       style={{
@@ -68,7 +79,15 @@ function ServerRowCountStatusPanel({ api }: CustomStatusPanelProps) {
       }}
     >
       <span style={{ opacity: 0.7 }}>Rows:</span>
-      <strong>{count == null ? "…" : count.toLocaleString()}</strong>
+      {total == null ? (
+        <strong>…</strong>
+      ) : isFiltered ? (
+        <strong>
+          {filtered!.toLocaleString()} of {total.toLocaleString()}
+        </strong>
+      ) : (
+        <strong>{total.toLocaleString()}</strong>
+      )}
     </span>
   );
 }
@@ -226,19 +245,31 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         string,
         unknown
       >;
-      // Always resolve the total filtered leaf-row count for the status bar.
-      // Uses NO value columns, so it can't throw on calculated columns the way
-      // the full aggregate query can — the count is what the status bar needs.
+      const quickFilter = quickFilterRef.current || undefined;
+      const isFiltered =
+        Object.keys(filterModelForCount).length > 0 || Boolean(quickFilter);
+      // Resolve row counts for the status bar via Perspective. Uses NO value
+      // columns, so it can't throw on calculated columns the way the full
+      // aggregate query can. Fetch the total (unfiltered) count and, when a
+      // filter is active, the filtered count too.
       try {
-        const countRes = await client.getAggregates({
+        const totalRes = await client.getAggregates({
           dataset: DATASET,
           valueCols: [],
-          filterModel: filterModelForCount,
-          quickFilterText: quickFilterRef.current || undefined,
+          filterModel: {},
         });
+        const filteredRes = isFiltered
+          ? await client.getAggregates({
+              dataset: DATASET,
+              valueCols: [],
+              filterModel: filterModelForCount,
+              quickFilterText: quickFilter,
+            })
+          : totalRes;
         api.setGridOption("context", {
           ...(api.getGridOption("context") as object | undefined),
-          filteredRowCount: countRes.rowCount,
+          totalRowCount: totalRes.rowCount,
+          filteredRowCount: filteredRes.rowCount,
         });
       } catch {
         /* ignore transient count failures */
