@@ -99,7 +99,6 @@ export default function App() {
 
   return (
     <div
-      data-ag-theme-mode="dark"
       style={{
         display: "flex",
         flexDirection: "column",
