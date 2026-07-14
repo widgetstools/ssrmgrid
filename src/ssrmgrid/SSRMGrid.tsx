@@ -403,7 +403,6 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           pivotPanelShow="always"
           sideBar={sideBar}
           statusBar={statusBar}
-          enableAdvancedFilter
           rowSelection={rowSelection}
           cellSelection={cellSelection}
           undoRedoCellEditing
