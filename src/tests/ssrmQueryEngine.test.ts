@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
+import { registerDataset } from "../data/schemas";
 import type { SsrmGetRowsRequest } from "../ssrm/types";
 import {
   COUNT_AGG_FIELD,
@@ -21,6 +22,23 @@ const BASE_ROW_GROUP_COLS: SsrmGetRowsRequest["rowGroupCols"] = [
 const BASE_VALUE_COLS: SsrmGetRowsRequest["valueCols"] = [
   { id: "notionalAmount", field: "notionalAmount", aggFunc: "sum" },
 ];
+
+beforeEach(() => {
+  registerDataset("positions", {
+    schema: {
+      positionId: "string",
+      desk: "string",
+      bookName: "string",
+      notionalAmount: "float",
+      pnl: "float",
+    },
+    index: "positionId",
+    calcExpressions: {
+      pnlPct: '"pnl" / "notionalAmount" * 100',
+    },
+    treeFields: ["desk", "bookName"],
+  });
+});
 
 function makeRequest(
   overrides: Partial<SsrmGetRowsRequest> = {},

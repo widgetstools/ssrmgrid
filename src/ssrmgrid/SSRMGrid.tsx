@@ -25,6 +25,7 @@ import {
   createPerspectiveDatasource,
   throttle,
 } from "../ssrm/createPerspectiveDatasource";
+import { getActiveFilterModel } from "../ssrm/activeFilterModel";
 import { exportAllViaAgGrid } from "../ssrm/exportAllViaAgGrid";
 import { refreshAllLoadedServerSideStores } from "../ssrm/refreshAllLoadedStores";
 import type { FeedConfig } from "../ssrm/types";
@@ -201,15 +202,29 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       [],
     );
 
+    // Sample only for type inference — capture once so rowData identity churn
+    // (CSRM-style fresh arrays) does not rebuild schema → reconfigure → wipe.
+    const sampleRowRef = useRef<Record<string, unknown> | undefined>(rowData?.[0]);
+    const [sampleRevision, setSampleRevision] = useState(0);
+    useEffect(() => {
+      const sample = rowData?.[0];
+      if (!sample || sampleRowRef.current) return;
+      sampleRowRef.current = sample;
+      setSampleRevision((n) => n + 1);
+    }, [rowData]);
+
+    const rowDataRef = useRef(rowData);
+    rowDataRef.current = rowData;
+
     // columnDefs -> Perspective schema/calc + the ag-grid defs.
     const override = useMemo(
       () =>
         buildColumnOverride(columnDefs, {
           index: idField,
-          sampleRow: rowData?.[0],
+          sampleRow: sampleRowRef.current,
           getFilterValues,
         }),
-      [columnDefs, idField, rowData, getFilterValues],
+      [columnDefs, idField, getFilterValues, sampleRevision],
     );
     const schemaRef = useRef(override.schema);
     schemaRef.current = override.schema;
@@ -245,13 +260,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         const client = clientRef.current;
         const api = apiRef.current;
         if (!client || !api) return;
-        const filterModelForCount = (api.getFilterModel() ?? {}) as Record<
-          string,
-          unknown
-        >;
+        const filterModel = getActiveFilterModel(api);
         const quickFilter = quickFilterRef.current || undefined;
         const isFiltered =
-          Object.keys(filterModelForCount).length > 0 || Boolean(quickFilter);
+          Object.keys(filterModel).length > 0 || Boolean(quickFilter);
         // Resolve row counts for the status bar via Perspective. Uses NO value
         // columns, so it can't throw on calculated columns the way the full
         // aggregate query can. The total is cached (see totalRowCountRef); only
@@ -271,7 +283,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
                 await client.getAggregates({
                   dataset: DATASET,
                   valueCols: [],
-                  filterModel: filterModelForCount,
+                  filterModel,
                   quickFilterText: quickFilter,
                 })
               ).rowCount
@@ -284,41 +296,45 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         } catch {
           /* ignore transient count failures */
         }
-      const valueCols = api.getValueColumns().map((col) => {
-        const def = col.getColDef();
-        return {
-          id: col.getColId(),
-          field: def.field ?? col.getColId(),
-          aggFunc: String(col.getAggFunc?.() ?? def.aggFunc ?? "sum"),
-        };
-      });
-      if (valueCols.length === 0) return;
-      try {
-        const filterModel = (api.getFilterModel() ?? {}) as Record<string, unknown>;
-        const result = await client.getAggregates({
-          dataset: DATASET,
-          valueCols,
-          filterModel,
+        const valueCols = api.getValueColumns().map((col) => {
+          const def = col.getColDef();
+          return {
+            id: col.getColId(),
+            field: def.field ?? col.getColId(),
+            aggFunc: String(col.getAggFunc?.() ?? def.aggFunc ?? "sum"),
+          };
         });
-        api.setGridOption("context", {
-          ...(api.getGridOption("context") as object | undefined),
-          totals: result.totals,
-          aggregates: result.aggregates,
-          filteredRowCount: result.rowCount,
-        });
-        props.onTotals?.(
-          `Σ ${result.rowCount.toLocaleString()} rows · ${formatTotals(result.totals)}`,
-        );
-        // Grand-total pinned bottom row (filtered aggregates), if requested.
-        if (props.grandTotalRow) {
-          const totalRow: Record<string, unknown> = { __ssrmGrandTotal: true };
-          for (const vc of valueCols) totalRow[vc.field] = result.aggregates[vc.field]?.[vc.aggFunc];
-          api.setGridOption("pinnedBottomRowData", [totalRow]);
+        if (valueCols.length === 0) return;
+        try {
+          const result = await client.getAggregates({
+            dataset: DATASET,
+            valueCols,
+            filterModel,
+            quickFilterText: quickFilter,
+          });
+          api.setGridOption("context", {
+            ...(api.getGridOption("context") as object | undefined),
+            totals: result.totals,
+            aggregates: result.aggregates,
+            filteredRowCount: result.rowCount,
+          });
+          props.onTotals?.(
+            `Σ ${result.rowCount.toLocaleString()} rows · ${formatTotals(result.totals)}`,
+          );
+          // Grand-total pinned bottom row (filtered aggregates), if requested.
+          if (props.grandTotalRow) {
+            const totalRow: Record<string, unknown> = { __ssrmGrandTotal: true };
+            for (const vc of valueCols) {
+              totalRow[vc.field] = result.aggregates[vc.field]?.[vc.aggFunc];
+            }
+            api.setGridOption("pinnedBottomRowData", [totalRow]);
+          }
+        } catch {
+          /* ignore transient totals failures */
         }
-      } catch {
-        /* ignore transient totals failures */
-      }
-    }, [props]);
+      },
+      [props],
+    );
 
     const datasource = useMemo(
       () =>
@@ -385,15 +401,16 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       const client = clientRef.current;
       if (!client) return;
       await client.configure(feedConfigRef.current);
-      if (rowData && rowData.length > 0) {
-        await client.setRowData(DATASET, rowData);
+      const rows = rowDataRef.current;
+      if (rows && rows.length > 0) {
+        await client.setRowData(DATASET, rows);
       }
       configuredRef.current = true;
       if (gridReadyRef.current && apiRef.current) {
         refreshAllLoadedServerSideStores(apiRef.current, { purge: true });
         void refreshTotals();
       }
-    }, [rowData, refreshTotals]);
+    }, [refreshTotals]);
 
     // Re-configure when the schema/config changes.
     useEffect(() => {
@@ -600,15 +617,25 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           [idField]: id,
           [field]: coerceEdited(schemaRef.current, field, event.newValue),
         };
-        void clientRef.current?.updateRows(DATASET, [patch]).catch(() => {
-          event.node.setDataValue(field, event.oldValue);
-        });
+        void clientRef.current
+          ?.updateRows(DATASET, [patch])
+          .then(() => {
+            if (apiRef.current) {
+              refreshAllLoadedServerSideStores(apiRef.current, { purge: false });
+              void refreshTotals({ refetchTotal: false });
+            }
+          })
+          .catch(() => {
+            event.node.setDataValue(field, event.oldValue);
+          });
       },
-      [idField],
+      [idField, refreshTotals],
     );
 
     const onStructureChanged = useCallback(() => {
-      apiRef.current?.refreshServerSide({ purge: true });
+      if (apiRef.current) {
+        refreshAllLoadedServerSideStores(apiRef.current, { purge: true });
+      }
       void refreshTotals();
     }, [refreshTotals]);
 

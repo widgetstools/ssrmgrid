@@ -2,6 +2,9 @@ import type { DatasetId, SsrmGetRowsRequest } from "../ssrm/types";
 
 /** Default measure fields that need filtered aggregates for share / class rules. */
 const DEFAULT_MEASURE_FIELDS: Record<DatasetId, string[]> = {
+  // Live <SSRMGrid> dataset id.
+  main: ["pnl", "notional", "notionalAmount", "marketValue", "quantity", "dailyPnl"],
+  // Legacy spike / test dataset ids.
   positions: ["pnl", "notionalAmount", "marketValue", "quantity", "dailyPnl"],
   trades: ["notionalAmount", "quantity", "price"],
 };

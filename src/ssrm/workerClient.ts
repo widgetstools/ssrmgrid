@@ -154,7 +154,16 @@ export function createWorkerClient() {
       onDirty = h;
     },
     dispose() {
-      worker.postMessage({ type: "dispose", requestId: crypto.randomUUID() });
+      const disposed = new Error("Worker disposed");
+      for (const [, p] of pending) {
+        p.reject(disposed);
+      }
+      pending.clear();
+      try {
+        worker.postMessage({ type: "dispose", requestId: crypto.randomUUID() });
+      } catch {
+        /* worker may already be gone */
+      }
       worker.terminate();
     },
   };
