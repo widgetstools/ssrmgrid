@@ -236,44 +236,54 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     quickFilterRef.current = props.quickFilterText ?? "";
     const absSortRef = useRef(props.absSort ?? false);
     absSortRef.current = props.absSort ?? false;
+    // Cached unfiltered total — only changes when the dataset changes (add/
+    // remove), never on filter, so filter changes reuse it instead of re-querying.
+    const totalRowCountRef = useRef<number | null>(null);
 
-    const refreshTotals = useCallback(async () => {
-      const client = clientRef.current;
-      const api = apiRef.current;
-      if (!client || !api) return;
-      const filterModelForCount = (api.getFilterModel() ?? {}) as Record<
-        string,
-        unknown
-      >;
-      const quickFilter = quickFilterRef.current || undefined;
-      const isFiltered =
-        Object.keys(filterModelForCount).length > 0 || Boolean(quickFilter);
-      // Resolve row counts for the status bar via Perspective. Uses NO value
-      // columns, so it can't throw on calculated columns the way the full
-      // aggregate query can. Fetch the total (unfiltered) count and, when a
-      // filter is active, the filtered count too.
-      try {
-        const totalRes = await client.getAggregates({
-          dataset: DATASET,
-          valueCols: [],
-          filterModel: {},
-        });
-        const filteredRes = isFiltered
-          ? await client.getAggregates({
+    const refreshTotals = useCallback(
+      async (opts?: { refetchTotal?: boolean }) => {
+        const client = clientRef.current;
+        const api = apiRef.current;
+        if (!client || !api) return;
+        const filterModelForCount = (api.getFilterModel() ?? {}) as Record<
+          string,
+          unknown
+        >;
+        const quickFilter = quickFilterRef.current || undefined;
+        const isFiltered =
+          Object.keys(filterModelForCount).length > 0 || Boolean(quickFilter);
+        // Resolve row counts for the status bar via Perspective. Uses NO value
+        // columns, so it can't throw on calculated columns the way the full
+        // aggregate query can. The total is cached (see totalRowCountRef); only
+        // the filtered count is re-queried on filter changes.
+        try {
+          if (opts?.refetchTotal !== false || totalRowCountRef.current == null) {
+            const totalRes = await client.getAggregates({
               dataset: DATASET,
               valueCols: [],
-              filterModel: filterModelForCount,
-              quickFilterText: quickFilter,
-            })
-          : totalRes;
-        api.setGridOption("context", {
-          ...(api.getGridOption("context") as object | undefined),
-          totalRowCount: totalRes.rowCount,
-          filteredRowCount: filteredRes.rowCount,
-        });
-      } catch {
-        /* ignore transient count failures */
-      }
+              filterModel: {},
+            });
+            totalRowCountRef.current = totalRes.rowCount;
+          }
+          const total = totalRowCountRef.current ?? 0;
+          const filtered = isFiltered
+            ? (
+                await client.getAggregates({
+                  dataset: DATASET,
+                  valueCols: [],
+                  filterModel: filterModelForCount,
+                  quickFilterText: quickFilter,
+                })
+              ).rowCount
+            : total;
+          api.setGridOption("context", {
+            ...(api.getGridOption("context") as object | undefined),
+            totalRowCount: total,
+            filteredRowCount: filtered,
+          });
+        } catch {
+          /* ignore transient count failures */
+        }
       const valueCols = api.getValueColumns().map((col) => {
         const def = col.getColDef();
         return {
@@ -391,15 +401,17 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [feedConfig]);
 
-    // Quick filter / abs sort changes: server-side re-query (debounced purge).
+    // Quick filter / abs sort changes: server-side re-query (debounced).
+    // The unfiltered total is unchanged by filtering, so it isn't re-queried
+    // (refetchTotal:false) — only the filtered count and the rows are refreshed.
     useEffect(() => {
       if (!gridReadyRef.current || !apiRef.current) return;
       const h = window.setTimeout(() => {
         if (apiRef.current) {
           refreshAllLoadedServerSideStores(apiRef.current, { purge: true });
-          void refreshTotals();
+          void refreshTotals({ refetchTotal: false });
         }
-      }, 200);
+      }, 120);
       return () => window.clearTimeout(h);
     }, [props.quickFilterText, props.absSort, refreshTotals]);
 
@@ -695,7 +707,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           onColumnRowGroupChanged={onStructureChanged}
           onColumnPivotChanged={onStructureChanged}
           onColumnPivotModeChanged={onStructureChanged}
-          onFilterChanged={() => void refreshTotals()}
+          onFilterChanged={() => void refreshTotals({ refetchTotal: false })}
           onCellValueChanged={onCellValueChanged}
           onFirstDataRendered={() => void refreshTotals()}
           onGridReady={(e) => {
