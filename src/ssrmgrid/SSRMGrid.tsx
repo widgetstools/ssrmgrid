@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { AgGridReact } from "ag-grid-react";
+import type { CustomStatusPanelProps } from "ag-grid-react";
 import type {
   CellValueChangedEvent,
   ColDef,
@@ -32,6 +33,45 @@ import { PIVOT_FIELD_SEPARATOR } from "../workers/ssrmQueryEngine";
 import { buildColumnOverride, type SSRMColDef } from "./columnOverride";
 
 const DATASET = "main";
+
+/**
+ * Total (filtered) leaf-row count for the SSRM status bar. AG Grid's built-in
+ * agTotalRowCount / agFilteredRowCount / agTotalAndFilteredRowCount panels warn
+ * and render nothing under the Server-Side Row Model, so — per AG Grid's own
+ * custom-status-panel guidance — we render the server-side count that SSRMGrid
+ * stashes in grid context (`filteredRowCount`) on every totals refresh.
+ */
+function ServerRowCountStatusPanel({ api }: CustomStatusPanelProps) {
+  const [count, setCount] = useState<number | null>(null);
+  useEffect(() => {
+    const read = () => {
+      const ctx = api.getGridOption("context") as
+        | { filteredRowCount?: number }
+        | undefined;
+      setCount(
+        typeof ctx?.filteredRowCount === "number" ? ctx.filteredRowCount : null,
+      );
+    };
+    read();
+    api.addEventListener("modelUpdated", read);
+    return () => api.removeEventListener("modelUpdated", read);
+  }, [api]);
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        padding: "0 12px",
+        lineHeight: "1.5",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span style={{ opacity: 0.7 }}>Rows:</span>
+      <strong>{count == null ? "…" : count.toLocaleString()}</strong>
+    </span>
+  );
+}
 
 /** ag-grid-style transaction (add/update by object, remove by object or id). */
 export interface SSRMTransaction {
@@ -182,6 +222,27 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       const client = clientRef.current;
       const api = apiRef.current;
       if (!client || !api) return;
+      const filterModelForCount = (api.getFilterModel() ?? {}) as Record<
+        string,
+        unknown
+      >;
+      // Always resolve the total filtered leaf-row count for the status bar.
+      // Uses NO value columns, so it can't throw on calculated columns the way
+      // the full aggregate query can — the count is what the status bar needs.
+      try {
+        const countRes = await client.getAggregates({
+          dataset: DATASET,
+          valueCols: [],
+          filterModel: filterModelForCount,
+          quickFilterText: quickFilterRef.current || undefined,
+        });
+        api.setGridOption("context", {
+          ...(api.getGridOption("context") as object | undefined),
+          filteredRowCount: countRes.rowCount,
+        });
+      } catch {
+        /* ignore transient count failures */
+      }
       const valueCols = api.getValueColumns().map((col) => {
         const def = col.getColDef();
         return {
@@ -537,12 +598,14 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const sideBar = useMemo(() => ({ toolPanels: ["columns", "filters"] }), []);
     const statusBar = useMemo(
       () => ({
-        // agTotalAndFilteredRowCountComponent is CSRM-only; under SSRM use the
-        // aggregation + selected-count panels (the filtered total is reported via
-        // onTotals from the server aggregate query instead).
+        // The built-in total/filtered row-count panels are client-side-row-model
+        // only (they warn + render nothing under SSRM), so the leaf count comes
+        // from a custom panel fed by the server-side count. Selected-count and
+        // range aggregation are native and sit on the right.
         statusPanels: [
-          { statusPanel: "agSelectedRowCountComponent" },
-          { statusPanel: "agAggregationComponent" },
+          { statusPanel: ServerRowCountStatusPanel, align: "left" as const },
+          { statusPanel: "agSelectedRowCountComponent", align: "right" as const },
+          { statusPanel: "agAggregationComponent", align: "right" as const },
         ],
       }),
       [],
@@ -603,6 +666,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           onColumnPivotModeChanged={onStructureChanged}
           onFilterChanged={() => void refreshTotals()}
           onCellValueChanged={onCellValueChanged}
+          onFirstDataRendered={() => void refreshTotals()}
           onGridReady={(e) => {
             apiRef.current = e.api;
             gridReadyRef.current = true;
