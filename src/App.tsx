@@ -105,7 +105,7 @@ export default function App() {
         flexDirection: "column",
         height: "100vh",
         margin: 0,
-        background: "#141a22",
+        background: "#1b1b1b",
         color: "#e6e8ec",
       }}
     >
@@ -115,7 +115,7 @@ export default function App() {
           alignItems: "center",
           gap: 16,
           padding: "8px 16px",
-          borderBottom: "1px solid #2a3543",
+          borderBottom: "1px solid #3a3a3a",
           font: "13px Inter, system-ui, sans-serif",
         }}
       >
@@ -132,9 +132,9 @@ export default function App() {
             padding: "4px 8px",
             font: "13px Inter, system-ui",
             width: 160,
-            background: "#1f2836",
+            background: "#2b2b2b",
             color: "#e6e8ec",
-            border: "1px solid #2a3543",
+            border: "1px solid #444",
             borderRadius: 3,
           }}
         />
