@@ -349,6 +349,12 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         flex: 1,
         minWidth: 100,
         filter: true,
+        // Persistent filter row under the headers — the most discoverable place
+        // for filters (the header funnel button only shows on hover in v36, and
+        // the ⋮ column menu no longer contains the filter).
+        floatingFilter: true,
+        // Always show the header filter (funnel) button too, not just on hover.
+        suppressHeaderFilterButton: false,
         enableValue: true,
         enableRowGroup: true,
         enablePivot: true,
