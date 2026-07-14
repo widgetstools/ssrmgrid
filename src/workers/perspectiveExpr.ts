@@ -1,8 +1,10 @@
 /**
- * Escape a string for embedding inside a Perspective expression literal.
+ * Escape a string for embedding inside a Perspective expression string literal.
+ * Perspective expressions use SINGLE quotes for string literals (double quotes
+ * denote a COLUMN reference), so we escape backslashes and single quotes.
  */
 export function escapePerspectiveString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
 /** Synthetic boolean column used for OR / quick-filter expression match. */

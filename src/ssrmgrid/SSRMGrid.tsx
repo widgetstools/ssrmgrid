@@ -11,8 +11,12 @@ import { AgGridReact } from "ag-grid-react";
 import type {
   CellValueChangedEvent,
   ColDef,
+  DefaultMenuItem,
+  GetContextMenuItemsParams,
+  GetDetailRowDataParams,
   GetRowIdParams,
   GridApi,
+  MenuItemDef,
 } from "ag-grid-community";
 import "../agGrid/modules";
 import { theme } from "../agGrid/theme";
@@ -20,6 +24,7 @@ import {
   createPerspectiveDatasource,
   throttle,
 } from "../ssrm/createPerspectiveDatasource";
+import { exportAllViaAgGrid } from "../ssrm/exportAllViaAgGrid";
 import { refreshAllLoadedServerSideStores } from "../ssrm/refreshAllLoadedStores";
 import type { FeedConfig } from "../ssrm/types";
 import { createWorkerClient } from "../ssrm/workerClient";
@@ -59,6 +64,32 @@ export interface SSRMGridProps {
   onTotals?: (summary: string) => void;
   /** Grid host height (default 100%). */
   height?: string | number;
+
+  // ---- gap-closing options (all off/absent by default) -------------------
+  /** Server-side quick filter (global search across text columns). */
+  quickFilterText?: string;
+  /** Enable server-side pagination. */
+  pagination?: boolean;
+  paginationPageSize?: number;
+  /** Use the Advanced Filter builder instead of column/set filters (exclusive). */
+  advancedFilter?: boolean;
+  /** Absolute-value sort for numeric measures. */
+  absSort?: boolean;
+  /** Pinned rows (passthrough — client-set, independent of the row model). */
+  pinnedTopRowData?: Record<string, unknown>[];
+  pinnedBottomRowData?: Record<string, unknown>[];
+  /** Integrated Charts on the selected range. */
+  enableCharts?: boolean;
+  /** Show a grand-total pinned bottom row (filtered aggregates). */
+  grandTotalRow?: boolean;
+  /** Master/detail: expandable detail grid per master row. */
+  masterDetail?: {
+    detailColumnDefs: ColDef[];
+    getDetailRowData: (masterRow: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    isRowMaster?: (row: Record<string, unknown>) => boolean;
+  };
+  /** Tree data: hierarchy fields (outer -> inner); leaf rows drill under them. */
+  treeFields?: string[];
 }
 
 function coerceEdited(
@@ -121,6 +152,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const schemaRef = useRef(override.schema);
     schemaRef.current = override.schema;
 
+    const treeData = (props.treeFields?.length ?? 0) > 0;
     const feedConfig = useMemo<FeedConfig>(
       () => ({
         dataset: DATASET,
@@ -128,11 +160,20 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         index: idField,
         calcExpressions: override.calcExpressions,
         refreshThrottleMs: props.refreshThrottleMs ?? 150,
+        treeFields: props.treeFields,
+        treeDataMode: treeData,
+        absSort: props.absSort,
       }),
-      [override, idField, props.refreshThrottleMs],
+      [override, idField, props.refreshThrottleMs, props.treeFields, treeData, props.absSort],
     );
     const feedConfigRef = useRef(feedConfig);
     feedConfigRef.current = feedConfig;
+
+    // Live extras threaded into every getRows request (read at call time).
+    const quickFilterRef = useRef(props.quickFilterText ?? "");
+    quickFilterRef.current = props.quickFilterText ?? "";
+    const absSortRef = useRef(props.absSort ?? false);
+    absSortRef.current = props.absSort ?? false;
 
     const refreshTotals = useCallback(async () => {
       const client = clientRef.current;
@@ -163,6 +204,12 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         props.onTotals?.(
           `Σ ${result.rowCount.toLocaleString()} rows · ${formatTotals(result.totals)}`,
         );
+        // Grand-total pinned bottom row (filtered aggregates), if requested.
+        if (props.grandTotalRow) {
+          const totalRow: Record<string, unknown> = { __ssrmGrandTotal: true };
+          for (const vc of valueCols) totalRow[vc.field] = result.aggregates[vc.field]?.[vc.aggFunc];
+          api.setGridOption("pinnedBottomRowData", [totalRow]);
+        }
       } catch {
         /* ignore transient totals failures */
       }
@@ -173,15 +220,32 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         createPerspectiveDatasource(
           () => clientRef.current,
           () => DATASET,
-          () => ({}),
-          (totals, filteredRowCount) => {
+          () => ({
+            quickFilterText: quickFilterRef.current || undefined,
+            treeData: treeData || undefined,
+            absSort: absSortRef.current || undefined,
+          }),
+          (totals, filteredRowCount, aggregates) => {
             const api = apiRef.current;
             if (api) {
               api.setGridOption("context", {
                 ...(api.getGridOption("context") as object | undefined),
                 totals,
+                aggregates,
                 filteredRowCount,
               });
+              // Grand-total pinned bottom row: use each measure's own aggFunc
+              // value (aggregates), falling back to the sum in `totals`.
+              if (props.grandTotalRow) {
+                const row: Record<string, unknown> = { __ssrmGrandTotal: true };
+                for (const c of columnDefs) {
+                  const f = c.field;
+                  if (!f || !c.aggFunc) continue;
+                  const byFn = aggregates?.[f] as Record<string, unknown> | undefined;
+                  row[f] = byFn?.[String(c.aggFunc)] ?? totals[f];
+                }
+                api.setGridOption("pinnedBottomRowData", [row]);
+              }
             }
             props.onTotals?.(
               `Σ ${filteredRowCount.toLocaleString()} rows · ${formatTotals(totals)}`,
@@ -231,6 +295,18 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       if (clientRef.current) void configureAndLoad();
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [feedConfig]);
+
+    // Quick filter / abs sort changes: server-side re-query (debounced purge).
+    useEffect(() => {
+      if (!gridReadyRef.current || !apiRef.current) return;
+      const h = window.setTimeout(() => {
+        if (apiRef.current) {
+          refreshAllLoadedServerSideStores(apiRef.current, { purge: true });
+          void refreshTotals();
+        }
+      }, 200);
+      return () => window.clearTimeout(h);
+    }, [props.quickFilterText, props.absSort, refreshTotals]);
 
     // Push a new rowData snapshot when it changes after configure.
     const firstRowData = useRef(true);
@@ -307,6 +383,11 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       (params: GetRowIdParams) => {
         const data = params.data as Record<string, unknown> | undefined;
         if (!data) return crypto.randomUUID();
+        // Tree data row (from the tree shaper).
+        if (treeData && data.__treeKey != null) {
+          const route = [...(params.parentKeys ?? []), String(data.__treeKey)].join("|");
+          return data.group ? `t:${route}` : `tl:${data.__treeKey}`;
+        }
         // Group row (from the server-side shaper).
         if (typeof data.childCount === "number") {
           const key = typeof data.__ssrmGroupKey === "string" ? data.__ssrmGroupKey : "";
@@ -318,7 +399,87 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         }
         return String(id);
       },
-      [idField],
+      [idField, treeData],
+    );
+
+    // ---- Master / detail ---------------------------------------------------
+    const md = props.masterDetail;
+    const isRowMaster = useCallback(
+      (data: Record<string, unknown> | undefined) => {
+        if (!md || !data || typeof data.childCount === "number" || data.group === true) return false;
+        return md.isRowMaster ? md.isRowMaster(data) : true;
+      },
+      [md],
+    );
+    const detailCellRendererParams = useMemo(
+      () =>
+        md
+          ? {
+              detailGridOptions: {
+                columnDefs: md.detailColumnDefs,
+                defaultColDef: { flex: 1, minWidth: 90 },
+              },
+              getDetailRowData: (p: GetDetailRowDataParams<Record<string, unknown>>) => {
+                void md
+                  .getDetailRowData(p.data)
+                  .then((rows) => p.successCallback(rows))
+                  .catch(() => p.successCallback([]));
+              },
+            }
+          : undefined,
+      [md],
+    );
+
+    // ---- Tree data ---------------------------------------------------------
+    const isServerSideGroup = useCallback(
+      (d: Record<string, unknown>) => d.group === true,
+      [],
+    );
+    const getServerSideGroupKey = useCallback(
+      (d: Record<string, unknown>) => String(d.__treeKey ?? ""),
+      [],
+    );
+
+    // ---- Export ALL filtered rows (not just loaded blocks) -----------------
+    const handleExportAll = useCallback(
+      async (format: "excel" | "csv") => {
+        const client = clientRef.current;
+        const api = apiRef.current;
+        if (!client || !api) return;
+        await exportAllViaAgGrid({
+          liveApi: api,
+          client,
+          dataset: DATASET,
+          format,
+          fileName: `export-all.${format === "excel" ? "xlsx" : "csv"}`,
+          limit: 100_000,
+          quickFilterText: quickFilterRef.current,
+          treeData,
+          absSort: absSortRef.current,
+        });
+      },
+      [treeData],
+    );
+    const getContextMenuItems = useCallback(
+      (params: GetContextMenuItemsParams): (DefaultMenuItem | MenuItemDef)[] =>
+        (params.defaultItems ?? []).flatMap((item): (DefaultMenuItem | MenuItemDef)[] => {
+          if (item === "csvExport")
+            return [{ name: "CSV export (all filtered rows)", action: () => void handleExportAll("csv") }];
+          if (item === "excelExport")
+            return [{ name: "Excel export (all filtered rows)", action: () => void handleExportAll("excel") }];
+          if (item === "export")
+            return [
+              {
+                name: "Export (all filtered rows)",
+                subMenu: [
+                  { name: "CSV", action: () => void handleExportAll("csv") },
+                  { name: "Excel", action: () => void handleExportAll("excel") },
+                ],
+              },
+            ];
+          return [item];
+        }),
+      [handleExportAll],
     );
 
     const onCellValueChanged = useCallback(
@@ -373,8 +534,11 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const sideBar = useMemo(() => ({ toolPanels: ["columns", "filters"] }), []);
     const statusBar = useMemo(
       () => ({
+        // agTotalAndFilteredRowCountComponent is CSRM-only; under SSRM use the
+        // aggregation + selected-count panels (the filtered total is reported via
+        // onTotals from the server aggregate query instead).
         statusPanels: [
-          { statusPanel: "agTotalAndFilteredRowCountComponent" },
+          { statusPanel: "agSelectedRowCountComponent" },
           { statusPanel: "agAggregationComponent" },
         ],
       }),
@@ -405,13 +569,26 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           cacheBlockSize={100}
           animateRows
           cellFlashDuration={500}
-          rowGroupPanelShow="always"
+          rowGroupPanelShow={treeData ? "never" : "always"}
           pivotPanelShow="always"
           sideBar={sideBar}
           statusBar={statusBar}
           rowSelection={rowSelection}
           cellSelection={cellSelection}
           undoRedoCellEditing
+          pagination={props.pagination}
+          paginationPageSize={props.paginationPageSize ?? 100}
+          enableAdvancedFilter={props.advancedFilter}
+          enableCharts={props.enableCharts}
+          pinnedTopRowData={props.pinnedTopRowData}
+          pinnedBottomRowData={props.pinnedBottomRowData}
+          treeData={treeData}
+          isServerSideGroup={treeData ? isServerSideGroup : undefined}
+          getServerSideGroupKey={treeData ? getServerSideGroupKey : undefined}
+          masterDetail={Boolean(md)}
+          isRowMaster={md ? isRowMaster : undefined}
+          detailCellRendererParams={detailCellRendererParams}
+          getContextMenuItems={getContextMenuItems}
           serverSidePivotResultFieldSeparator={PIVOT_FIELD_SEPARATOR}
           getRowId={getRowIdCb}
           getChildCount={(data) =>

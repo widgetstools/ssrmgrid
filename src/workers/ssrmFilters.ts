@@ -34,7 +34,28 @@ function literal(value: string | number | boolean | null): string {
   if (value === null) return "null";
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") return String(value);
-  return `"${escapePerspectiveString(value)}"`;
+  // Single quotes = string literal in Perspective expressions (double quotes are
+  // column references).
+  return `'${escapePerspectiveString(value)}'`;
+}
+
+/** Escape regex metacharacters so a plain needle matches literally in `match`. */
+function regexEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A Perspective single-quoted string literal for a regex pattern. */
+function patternLiteral(pattern: string): string {
+  return `'${escapePerspectiveString(pattern)}'`;
+}
+
+/**
+ * Case-insensitive substring test. Perspective's expression language has no
+ * `contains`/`starts_with` — it exposes `match(str, regex)` (regex search), so
+ * we lower-case the column and match a regex-escaped needle.
+ */
+function containsExpr(colExpr: string, needleLower: string): string {
+  return `match(lower(string(${colExpr})), ${patternLiteral(regexEscape(needleLower))})`;
 }
 
 /** Convert a Perspective filter tuple into an expression fragment, or null. */
@@ -58,13 +79,13 @@ export function perspectiveFilterToExpr(
     case ">=":
       return `${col} ${op} ${literal(operand as string | number | boolean | null)}`;
     case "contains":
-      return `contains(lower(string(${col})), ${literal(String(operand ?? "").toLowerCase())})`;
+      return containsExpr(col, String(operand ?? "").toLowerCase());
     case "!contains":
-      return `not contains(lower(string(${col})), ${literal(String(operand ?? "").toLowerCase())})`;
+      return `not ${containsExpr(col, String(operand ?? "").toLowerCase())}`;
     case "starts with":
-      return `starts_with(lower(string(${col})), ${literal(String(operand ?? "").toLowerCase())})`;
+      return `match(lower(string(${col})), ${patternLiteral("^" + regexEscape(String(operand ?? "").toLowerCase()))})`;
     case "ends with":
-      return `ends_with(lower(string(${col})), ${literal(String(operand ?? "").toLowerCase())})`;
+      return `match(lower(string(${col})), ${patternLiteral(regexEscape(String(operand ?? "").toLowerCase()) + "$")})`;
     case "in": {
       if (!Array.isArray(operand) || operand.length === 0) return null;
       return `(${operand.map((v) => `${col} == ${literal(String(v))}`).join(" or ")})`;
@@ -112,10 +133,7 @@ export function quickFilterToPlan(
 ): FilterPlan {
   const needle = (text ?? "").trim().toLowerCase();
   if (!needle || stringColumns.length === 0) return {};
-  const lit = literal(needle);
-  const parts = stringColumns.map(
-    (field) => `contains(lower(string("${field}")), ${lit})`,
-  );
+  const parts = stringColumns.map((field) => containsExpr(`"${field}"`, needle));
   return {
     expressions: { [QUICK_FILTER_EXPR]: parts.join(" or ") },
     filters: [[QUICK_FILTER_EXPR, "==", true]],

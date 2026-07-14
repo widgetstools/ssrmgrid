@@ -12,6 +12,7 @@ export default function App() {
 
   const [rate, setRate] = useState(500);
   const [totals, setTotals] = useState("");
+  const [quickFilter, setQuickFilter] = useState("");
 
   const columnDefs = useMemo<SSRMColDef[]>(
     () => [
@@ -82,9 +83,15 @@ export default function App() {
       >
         <strong>&lt;SSRMGrid&gt;</strong>
         <span style={{ color: "#666" }}>
-          AG Grid Enterprise (SSRM) · FINOS Perspective engine · {ROW_COUNT.toLocaleString()} rows,
-          all ticking
+          AG Grid Enterprise (SSRM) · Perspective · {ROW_COUNT.toLocaleString()} rows, all ticking
         </span>
+        <input
+          type="search"
+          placeholder="Quick filter…"
+          value={quickFilter}
+          onChange={(e) => setQuickFilter(e.target.value)}
+          style={{ padding: "4px 8px", font: "13px Inter, system-ui", width: 160 }}
+        />
         <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           Tick rate: <strong>{rate.toLocaleString()}</strong> rows/s
           <input
@@ -105,6 +112,10 @@ export default function App() {
           rowData={rowsRef.current}
           getRowId="id"
           onTotals={setTotals}
+          quickFilterText={quickFilter}
+          enableCharts
+          pagination
+          paginationPageSize={100}
         />
       </div>
     </div>
