@@ -128,6 +128,9 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const configuredRef = useRef(false);
     const asyncBufferRef = useRef<SSRMTransaction | null>(null);
     const [, forceRerender] = useState(0);
+    // Grand-total pinned bottom row (managed via state so React doesn't clobber
+    // it — a static pinnedBottomRowData prop would reset an imperative set).
+    const [grandTotalData, setGrandTotalData] = useState<Record<string, unknown>[] | undefined>();
 
     // Distinct values for set filters -> Perspective, server-side.
     const getFilterValues = useCallback(
@@ -244,7 +247,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
                   const byFn = aggregates?.[f] as Record<string, unknown> | undefined;
                   row[f] = byFn?.[String(c.aggFunc)] ?? totals[f];
                 }
-                api.setGridOption("pinnedBottomRowData", [row]);
+                setGrandTotalData([row]);
               }
             }
             props.onTotals?.(
@@ -581,7 +584,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           enableAdvancedFilter={props.advancedFilter}
           enableCharts={props.enableCharts}
           pinnedTopRowData={props.pinnedTopRowData}
-          pinnedBottomRowData={props.pinnedBottomRowData}
+          pinnedBottomRowData={props.grandTotalRow ? grandTotalData : props.pinnedBottomRowData}
           treeData={treeData}
           isServerSideGroup={treeData ? isServerSideGroup : undefined}
           getServerSideGroupKey={treeData ? getServerSideGroupKey : undefined}

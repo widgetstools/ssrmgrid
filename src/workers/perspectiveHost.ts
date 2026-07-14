@@ -5,6 +5,7 @@ import CLIENT_WASM from "@finos/perspective/dist/wasm/perspective-js.wasm?url";
 import SERVER_WORKER_URL from "@finos/perspective/dist/cdn/perspective-server.worker.js?url";
 
 import { getDatasetPrimaryKey, getSchema } from "../data/schemas";
+import { getCalculatedExpressions } from "../data/calculatedColumns";
 import type {
   AggregateRequest,
   AggregateResult,
@@ -543,6 +544,9 @@ export function createPerspectiveHost(
       const columns: string[] = [countField];
       const exprMap: Record<string, string> = {
         [AGG_ROOT_EXPR]: "1",
+        // Calc columns are Perspective expressions — define them so a value col
+        // that IS a calc column (e.g. pnlBps) can be referenced/aggregated here.
+        ...getCalculatedExpressions(dataset),
         ...plan.expressions,
       };
       const aliasBySpec: Array<{
