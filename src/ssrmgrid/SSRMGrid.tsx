@@ -358,6 +358,12 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       [props.defaultColDef],
     );
 
+    // The auto group column needs real width or the group key clips to just the
+    // "(count)". Consumers can override via defaultColDef-style width if needed.
+    const autoGroupColumnDef = useMemo<ColDef>(
+      () => ({ headerName: "Group", minWidth: 240, flex: 1, pinned: "left" }),
+      [],
+    );
     const sideBar = useMemo(() => ({ toolPanels: ["columns", "filters"] }), []);
     const statusBar = useMemo(
       () => ({
@@ -387,6 +393,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           theme={theme}
           columnDefs={override.agGridColumnDefs}
           defaultColDef={defaultColDef}
+          autoGroupColumnDef={autoGroupColumnDef}
           rowModelType="serverSide"
           serverSideDatasource={datasource}
           cacheBlockSize={100}
