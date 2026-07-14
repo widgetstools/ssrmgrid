@@ -169,7 +169,7 @@ describe("mapFilterModel", () => {
       ],
     });
     expect(plan.postPredicate).toBeUndefined();
-    expect(plan.expressions?.__ssrm_or_match).toContain("contains");
+    expect(plan.expressions?.__ssrm_or_match).toContain("match(lower");
     expect(plan.filters).toEqual([["__ssrm_or_match", "==", true]]);
   });
 

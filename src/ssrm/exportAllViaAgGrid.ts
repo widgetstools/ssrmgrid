@@ -6,16 +6,9 @@ import {
 
 import type { createWorkerClient } from "./workerClient";
 import type { DatasetId, QueryAllRequest } from "./types";
+import { getActiveFilterModel } from "./activeFilterModel";
 
 export type ExportFormat = "excel" | "csv";
-
-function getActiveFilterModel(api: GridApi): Record<string, unknown> {
-  const advanced = api.getAdvancedFilterModel?.();
-  if (advanced) {
-    return advanced as unknown as Record<string, unknown>;
-  }
-  return (api.getFilterModel() ?? {}) as Record<string, unknown>;
-}
 
 function readSortModel(api: GridApi): { colId: string; sort: "asc" | "desc" }[] {
   return api

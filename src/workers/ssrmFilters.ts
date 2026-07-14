@@ -324,8 +324,10 @@ function evalSimpleAgainstRow(
   }
 
   if (filterType === "text" || filterType === "agTextColumnFilter") {
-    const s = value == null ? "" : String(value);
-    const needle = filter.filter == null ? "" : String(filter.filter);
+    // Match the Perspective expression path (match(lower(...))) — case-insensitive.
+    const s = value == null ? "" : String(value).toLowerCase();
+    const needle =
+      filter.filter == null ? "" : String(filter.filter).toLowerCase();
     switch (type) {
       case "equals":
         return s === needle;

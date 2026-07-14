@@ -377,16 +377,70 @@ export function createPerspectiveHost(
       const view = await table.view(mapped.viewConfig);
       let structureView: Awaited<ReturnType<Table["view"]>> | null = null;
       try {
-        // Always fetch the full view result; pagination happens after shaping /
-        // postPredicate / clientSort so start/end never truncate before filter.
-        const rawCount = Number(await view.num_rows());
-        let jsonRows = (await view.to_json()) as Record<string, unknown>[];
-
         const isGrouped =
           mapped.mode === "group" ||
           (mapped.mode === "tree" && Boolean(mapped.groupField)) ||
           (mapped.mode === "pivot" &&
             (mapped.viewConfig.group_by?.length ?? 0) > 0);
+
+        const needsFullMaterialize =
+          mapped.mode === "pivot" ||
+          Boolean(mapped.postPredicate) ||
+          Boolean(mapped.clientSort?.length);
+
+        // When Perspective already applied filter+sort, window via to_json so
+        // SSRM blocks don't pull the entire matching view into the worker.
+        if (!needsFullMaterialize) {
+          const rawCount = Number(await view.num_rows());
+          // Perspective emits a leading grand-total row (empty __ROW_PATH__) for
+          // group_by views — offset the window so startRow indexes logical groups.
+          const rowOffset = isGrouped ? 1 : 0;
+          const baseCount = Math.max(rawCount - rowOffset, 0);
+          const window = {
+            start_row: mapped.startRow + rowOffset,
+            end_row: mapped.endRow + rowOffset,
+            start_col: null,
+            end_col: null,
+            id: null,
+            index: null,
+            leaves_only: null,
+            formatted: null,
+            compression: null,
+          };
+          const jsonRows = (await view.to_json(window)) as Record<
+            string,
+            unknown
+          >[];
+
+          let rowData =
+            mapped.mode === "group" && mapped.groupField
+              ? shapeGroupRows(
+                  jsonRows,
+                  mapped.groupField,
+                  request.valueCols,
+                  countField,
+                )
+              : mapped.mode === "tree" && mapped.groupField
+                ? shapeTreeGroupRows(
+                    jsonRows,
+                    mapped.groupField,
+                    request.valueCols,
+                    countField,
+                  )
+                : mapped.mode === "tree"
+                  ? shapeTreeLeafRows(jsonRows, getDatasetPrimaryKey(dataset))
+                  : shapeLeafRows(jsonRows);
+
+          return attachFilteredAggregates({
+            rowData,
+            rowCount: baseCount,
+          });
+        }
+
+        // Always fetch the full view result; pagination happens after shaping /
+        // postPredicate / clientSort so start/end never truncate before filter.
+        const rawCount = Number(await view.num_rows());
+        let jsonRows = (await view.to_json()) as Record<string, unknown>[];
 
         if (isGrouped) {
           jsonRows = dropPerspectiveTotalsRow(jsonRows);

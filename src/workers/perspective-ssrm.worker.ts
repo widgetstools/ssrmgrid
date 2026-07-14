@@ -5,10 +5,20 @@ import { createPerspectiveHost, type PerspectiveHost } from "./perspectiveHost";
 
 let host: PerspectiveHost | null = null;
 let hostInitPromise: Promise<PerspectiveHost> | null = null;
-let configureChain: Promise<void> = Promise.resolve();
+/** Serializes configure + all table ops so getRows never races a wipe. */
+let opChain: Promise<void> = Promise.resolve();
 
 function emit(msg: WorkerOutbound): void {
   self.postMessage(msg);
+}
+
+function enqueueOp<T>(fn: () => Promise<T>): Promise<T> {
+  const run = opChain.then(fn, fn);
+  opChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 async function ensureHost(): Promise<PerspectiveHost> {
@@ -60,10 +70,9 @@ self.onmessage = async (ev: MessageEvent<WorkerInbound>) => {
   try {
     switch (msg.type) {
       case "configure": {
-        const configureMsg = msg;
-        const runConfigure = async (): Promise<void> => {
+        await enqueueOp(async () => {
           const h = await ensureHost();
-          const cfg = configureMsg.config;
+          const cfg = msg.config;
           // Register the schema/index/calc/tree the consumer derived from
           // columnDefs, then create the (empty) Perspective table for it.
           registerDataset(cfg.dataset, {
@@ -76,140 +85,161 @@ self.onmessage = async (ev: MessageEvent<WorkerInbound>) => {
           const rowCount = await h.size();
           const reply: WorkerOutbound = {
             type: "configureResult",
-            requestId: configureMsg.requestId,
+            requestId: msg.requestId,
             ok: true,
             rowCount,
           };
           self.postMessage(reply);
-        };
-        configureChain = configureChain.then(runConfigure, runConfigure);
-        await configureChain;
+        });
         break;
       }
       case "setRowData": {
-        const h = await ensureHost();
-        const rowCount = await h.replaceDataset(msg.dataset, msg.rows);
-        const reply: WorkerOutbound = {
-          type: "setRowDataResult",
-          requestId: msg.requestId,
-          ok: true,
-          rowCount,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          const rowCount = await h.replaceDataset(msg.dataset, msg.rows);
+          const reply: WorkerOutbound = {
+            type: "setRowDataResult",
+            requestId: msg.requestId,
+            ok: true,
+            rowCount,
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "getRows": {
-        const h = await ensureHost();
-        const result = await h.query(msg.request);
-        const reply: WorkerOutbound = {
-          type: "getRowsResult",
-          requestId: msg.requestId,
-          ok: true,
-          result,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          const result = await h.query(msg.request);
+          const reply: WorkerOutbound = {
+            type: "getRowsResult",
+            requestId: msg.requestId,
+            ok: true,
+            result,
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "getFilterValues": {
-        const h = await ensureHost();
-        const values = await h.getFilterValues(msg.dataset, msg.field);
-        const reply: WorkerOutbound = {
-          type: "getFilterValuesResult",
-          requestId: msg.requestId,
-          ok: true,
-          values,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          const values = await h.getFilterValues(msg.dataset, msg.field);
+          const reply: WorkerOutbound = {
+            type: "getFilterValuesResult",
+            requestId: msg.requestId,
+            ok: true,
+            values,
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "updateRows": {
-        const h = await ensureHost();
-        await h.upsertRows(msg.dataset, msg.rows);
-        const reply: WorkerOutbound = {
-          type: "updateRowsResult",
-          requestId: msg.requestId,
-          ok: true,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          await h.upsertRows(msg.dataset, msg.rows);
+          const reply: WorkerOutbound = {
+            type: "updateRowsResult",
+            requestId: msg.requestId,
+            ok: true,
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "removeRows": {
-        const h = await ensureHost();
-        await h.removeRows(msg.dataset, msg.ids);
-        const reply: WorkerOutbound = {
-          type: "removeRowsResult",
-          requestId: msg.requestId,
-          ok: true,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          await h.removeRows(msg.dataset, msg.ids);
+          const reply: WorkerOutbound = {
+            type: "removeRowsResult",
+            requestId: msg.requestId,
+            ok: true,
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "applyTransaction": {
-        const h = await ensureHost();
-        await h.applyTransaction(msg.request);
-        const reply: WorkerOutbound = {
-          type: "applyTransactionResult",
-          requestId: msg.requestId,
-          ok: true,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          await h.applyTransaction(msg.request);
+          const reply: WorkerOutbound = {
+            type: "applyTransactionResult",
+            requestId: msg.requestId,
+            ok: true,
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "getAggregates": {
-        const h = await ensureHost();
-        const result = await h.getAggregates(msg.request);
-        const reply: WorkerOutbound = {
-          type: "getAggregatesResult",
-          requestId: msg.requestId,
-          ok: true,
-          result,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          const result = await h.getAggregates(msg.request);
+          const reply: WorkerOutbound = {
+            type: "getAggregatesResult",
+            requestId: msg.requestId,
+            ok: true,
+            result,
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "queryAll": {
-        const h = await ensureHost();
-        const { rowData, rowCount } = await h.queryAll(msg.request);
-        const reply: WorkerOutbound = {
-          type: "queryAllResult",
-          requestId: msg.requestId,
-          ok: true,
-          rowData,
-          rowCount,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          const { rowData, rowCount, pivotResultFields } = await h.queryAll(msg.request);
+          const reply: WorkerOutbound = {
+            type: "queryAllResult",
+            requestId: msg.requestId,
+            ok: true,
+            rowData,
+            rowCount,
+            ...(pivotResultFields ? { pivotResultFields } : {}),
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "getDetailRows": {
-        const h = await ensureHost();
-        const rowData = await h.getDetailRows(msg.request);
-        const reply: WorkerOutbound = {
-          type: "getDetailRowsResult",
-          requestId: msg.requestId,
-          ok: true,
-          rowData,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          const rowData = await h.getDetailRows(msg.request);
+          const reply: WorkerOutbound = {
+            type: "getDetailRowsResult",
+            requestId: msg.requestId,
+            ok: true,
+            rowData,
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "getSeriesData": {
-        const h = await ensureHost();
-        const result = await h.getSeriesData(msg.request);
-        const reply: WorkerOutbound = {
-          type: "getSeriesDataResult",
-          requestId: msg.requestId,
-          ok: true,
-          result,
-        };
-        self.postMessage(reply);
+        await enqueueOp(async () => {
+          const h = await ensureHost();
+          const result = await h.getSeriesData(msg.request);
+          const reply: WorkerOutbound = {
+            type: "getSeriesDataResult",
+            requestId: msg.requestId,
+            ok: true,
+            result,
+          };
+          self.postMessage(reply);
+        });
         break;
       }
       case "dispose": {
-        if (host) {
-          await host.clear();
-          host = null;
-        }
-        hostInitPromise = null;
+        await enqueueOp(async () => {
+          if (host) {
+            await host.clear();
+            host = null;
+          }
+          hostInitPromise = null;
+        });
         break;
       }
     }
