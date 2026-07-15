@@ -1,0 +1,17 @@
+export { SSRMGrid } from './ssrmgrid/SSRMGrid';
+export type {
+  SSRMGridHandle,
+  SSRMGridProps,
+  SSRMTransaction,
+  GrandTotalRowMode,
+  GroupTotalRowMode,
+} from './ssrmgrid/SSRMGrid';
+export type { SSRMColDef } from './ssrmgrid/columnOverride';
+export {
+  shareOfTotal,
+  shareOfAggregate,
+  formatShareOfTotal,
+  formatShareOfAggregate,
+  shareExceeds,
+  resolveAggregate,
+} from './ssrm/shareOfTotal';

@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "./src/ssrmgrid/SSRMGrid.tsx",
+  "types": "./src/ssrmgrid/SSRMGrid.tsx",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "description": "Transparent CSRM-style AG Grid component backed by FINOS Perspective via SSRM. Consumers pass columnDefs/rowData/getRowId and applyTransaction; the grid runs the Server-Side Row Model against Perspective for grouping/aggregation/pivot/filter at scale, with live ticking.",
   "scripts": {
     "dev": "vite",
