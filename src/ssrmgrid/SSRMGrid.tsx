@@ -526,11 +526,16 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       clientRef.current = client;
       client.setDirtyHandler((msg) => {
         onDirtyRef.current?.(msg);
+        // configureAndLoad owns the first refresh after setRowData; applying a
+        // dirty purge mid-configure bumps refreshGeneration and abandons the
+        // in-flight getRows → permanent Loading overlay.
+        if (!configuredRef.current) return;
         const api = apiRef.current;
         if (!api) return;
-        const mode = applyWorkerDirtyToGrid(api, msg, {
+        const mode = applyWorkerDirtyToGrid(msg, {
           throttleRefresh: () => throttleRef.current?.(),
-          purgeRefresh: () => purgeRefreshStoresRef.current(),
+          purgeRefresh: () =>
+            purgeRefreshStoresRef.current({ bumpGeneration: false }),
         });
         // Purge path already refreshes totals inside purgeRefreshStores.
         if (mode === "surgical") {

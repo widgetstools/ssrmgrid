@@ -1,4 +1,3 @@
-import type { GridApi } from "ag-grid-community";
 import type { WorkerOutbound } from "./types";
 
 export type DirtyMessage = Extract<WorkerOutbound, { type: "dirty" }>;
@@ -11,14 +10,13 @@ export type DirtyRefreshActions = {
 };
 
 /**
- * Apply a worker `dirty` event to the AG Grid SSRM surface.
+ * Choose refresh strategy for a worker `dirty` event.
  *
- * - Leaf `update`/`add` → surgical `applyServerSideTransactionAsync` + soft refresh
- *   (group stores still need a refresh; surgical update helps flash visible leaves).
+ * - Leaf `update`/`add` → soft refresh of loaded stores (matches host tick path;
+ *   route-aware surgical txs are OUT for grouped SSRM).
  * - Otherwise → purge refresh (full replace / removes / empty payload).
  */
 export function applyWorkerDirtyToGrid(
-  api: GridApi,
   msg: DirtyMessage,
   actions: DirtyRefreshActions,
 ): "surgical" | "purge" {
@@ -29,10 +27,6 @@ export function applyWorkerDirtyToGrid(
     (update != null && update.length > 0) || (add != null && add.length > 0);
 
   if (hasLeaf) {
-    api.applyServerSideTransactionAsync({
-      ...(update?.length ? { update } : {}),
-      ...(add?.length ? { add } : {}),
-    });
     actions.throttleRefresh();
     return "surgical";
   }
