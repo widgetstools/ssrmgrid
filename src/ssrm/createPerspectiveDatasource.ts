@@ -1,6 +1,12 @@
 import type { IServerSideDatasource } from "ag-grid-community";
 
-import type { DatasetId } from "./types";
+import {
+  fingerprintBlockRequest,
+  type BlockCacheKeyParts,
+  type CachedGetRows,
+  type SsrmBlockCache,
+} from "./ssrmBlockCache";
+import type { DatasetId, SsrmGetRowsResult } from "./types";
 import type { createWorkerClient } from "./workerClient";
 
 export function throttle(fn: () => void, ms: number): () => void {
@@ -53,31 +59,103 @@ function buildGrandTotalData(
   return hasValue ? row : undefined;
 }
 
+function toCached(result: SsrmGetRowsResult): CachedGetRows {
+  return {
+    rowData: result.rowData,
+    rowCount: result.rowCount,
+    ...(result.pivotResultFields
+      ? { pivotResultFields: result.pivotResultFields }
+      : {}),
+    ...(result.totals ? { totals: result.totals } : {}),
+    ...(result.aggregates ? { aggregates: result.aggregates } : {}),
+    ...(result.filteredRowCount != null
+      ? { filteredRowCount: result.filteredRowCount }
+      : {}),
+  };
+}
+
+export type PerspectiveDatasourceExtras = {
+  quickFilterText?: string;
+  quickFilterFields?: string[];
+  treeData?: boolean;
+  absSort?: boolean;
+  rowKeepExpression?: string;
+  /** Bumped on purge refresh; drop block results from an older generation. */
+  refreshGeneration?: number;
+  /**
+   * When true, attach AG Grid 36 `grandTotalData` on success (native
+   * `grandTotalRow` modes).
+   */
+  includeGrandTotal?: boolean;
+  /** False until configure + initial setRowData finish. */
+  isConfigured?: boolean;
+};
+
 export function createPerspectiveDatasource(
   getClient: () => ReturnType<typeof createWorkerClient> | null,
   getDataset: () => DatasetId,
-  getExtras?: () => {
-    quickFilterText?: string;
-    quickFilterFields?: string[];
-    treeData?: boolean;
-    absSort?: boolean;
-    rowKeepExpression?: string;
-    /** Bumped on purge refresh; drop block results from an older generation. */
-    refreshGeneration?: number;
-    /**
-     * When true, attach AG Grid 36 `grandTotalData` on success (native
-     * `grandTotalRow` modes).
-     */
-    includeGrandTotal?: boolean;
-    /** False until configure + initial setRowData finish. */
-    isConfigured?: boolean;
-  },
+  getExtras?: () => PerspectiveDatasourceExtras,
   onTotals?: (
     totals: Record<string, unknown>,
     filteredRowCount: number,
     aggregates?: Record<string, Record<string, unknown>>,
   ) => void,
+  /**
+   * Optional main-thread block cache. Hits call `params.success` synchronously.
+   * Host should `clear()` on dirty / purge so soft-refresh does not serve stale ticks.
+   */
+  blockCache?: SsrmBlockCache,
 ): IServerSideDatasource {
+  const prefetchNeighbor = (
+    keyParts: BlockCacheKeyParts,
+    direction: -1 | 1,
+  ) => {
+    if (!blockCache) return;
+    const len = keyParts.endRow - keyParts.startRow;
+    if (len <= 0) return;
+    const startRow = keyParts.startRow + direction * len;
+    if (startRow < 0) return;
+    const endRow = startRow + len;
+    const neighborKey = fingerprintBlockRequest({ ...keyParts, startRow, endRow });
+    if (blockCache.get(neighborKey)) return;
+
+    const client = getClient();
+    if (!client || !getExtras?.().isConfigured) return;
+
+    void blockCache.getOrLoad(neighborKey, async () => {
+      const extras = getExtras?.() ?? {};
+      const result = await client.getRows({
+        dataset: keyParts.dataset,
+        startRow,
+        endRow,
+        rowGroupCols: keyParts.rowGroupCols.map((c) => ({
+          id: c.id,
+          field: c.field,
+          displayName: c.field,
+        })),
+        valueCols: keyParts.valueCols,
+        pivotCols: keyParts.pivotCols.map((c) => ({
+          id: c.id,
+          field: c.field,
+          displayName: c.field,
+        })),
+        pivotMode: keyParts.pivotMode,
+        groupKeys: keyParts.groupKeys,
+        filterModel: keyParts.filterModel,
+        sortModel: keyParts.sortModel.map((s) => ({
+          colId: s.colId,
+          sort: s.sort as "asc" | "desc",
+        })),
+        quickFilterText: extras.quickFilterText,
+        quickFilterFields: extras.quickFilterFields,
+        treeData: extras.treeData,
+        absSort: extras.absSort,
+        rowKeepExpression: extras.rowKeepExpression,
+      });
+      return toCached(result);
+    });
+  };
+
   return {
     getRows(params) {
       const client = getClient();
@@ -93,53 +171,39 @@ export function createPerspectiveDatasource(
         field: c.field ?? "",
         aggFunc: c.aggFunc ?? "",
       }));
+      const startRow = req.startRow ?? 0;
+      const endRow = req.endRow ?? 100;
 
-      const run = async () => {
-        // Cold mounts fire getRows before configure+setRowData. Waiting avoids
-        // a permanent ERR cell from params.fail() on an empty/unindexed table.
-        for (let i = 0; i < 400; i++) {
-          if (getExtras?.().isConfigured) break;
-          await new Promise((r) => setTimeout(r, 25));
-        }
-        if (!getExtras?.().isConfigured) {
-          params.fail();
-          return;
-        }
+      const keyParts: BlockCacheKeyParts = {
+        dataset: getDataset(),
+        startRow,
+        endRow,
+        rowGroupCols: (req.rowGroupCols ?? []).map((c) => ({
+          id: c.id,
+          field: c.field ?? "",
+        })),
+        valueCols,
+        pivotCols: (req.pivotCols ?? []).map((c) => ({
+          id: c.id,
+          field: c.field ?? "",
+        })),
+        pivotMode: Boolean(req.pivotMode),
+        groupKeys: [...(req.groupKeys ?? [])],
+        filterModel: (req.filterModel ?? {}) as Record<string, unknown>,
+        sortModel: (req.sortModel ?? []).map((s) => ({
+          colId: s.colId,
+          sort: s.sort,
+        })),
+        quickFilterText: extras.quickFilterText,
+        quickFilterFields: extras.quickFilterFields,
+        treeData: extras.treeData,
+        absSort: extras.absSort,
+        rowKeepExpression: extras.rowKeepExpression,
+        refreshGeneration: generationAtStart,
+      };
+      const cacheKey = fingerprintBlockRequest(keyParts);
 
-        const result = await client.getRows({
-          dataset: getDataset(),
-          startRow: req.startRow ?? 0,
-          endRow: req.endRow ?? 100,
-          rowGroupCols: (req.rowGroupCols ?? []).map((c) => ({
-            id: c.id,
-            field: c.field ?? "",
-            displayName: c.displayName ?? "",
-          })),
-          valueCols,
-          pivotCols: (req.pivotCols ?? []).map((c) => ({
-            id: c.id,
-            field: c.field ?? "",
-            displayName: c.displayName ?? "",
-          })),
-          pivotMode: Boolean(req.pivotMode),
-          groupKeys: req.groupKeys ?? [],
-          filterModel: (req.filterModel ?? {}) as Record<string, unknown>,
-          sortModel: (req.sortModel ?? []).map((s) => ({
-            colId: s.colId,
-            sort: s.sort as "asc" | "desc",
-          })),
-          quickFilterText: extras.quickFilterText,
-          quickFilterFields: extras.quickFilterFields,
-          treeData: extras.treeData,
-          absSort: extras.absSort,
-          rowKeepExpression: extras.rowKeepExpression,
-        });
-
-        const currentGen = getExtras?.().refreshGeneration ?? 0;
-        if (generationAtStart !== currentGen) {
-          params.fail();
-          return;
-        }
+      const deliver = (result: CachedGetRows) => {
         if (result.totals && onTotals) {
           onTotals(
             result.totals,
@@ -151,7 +215,8 @@ export function createPerspectiveDatasource(
         const includeGrandTotal =
           Boolean(extras.includeGrandTotal) &&
           (req.groupKeys?.length ?? 0) === 0 &&
-          (params.needsGrandTotal || Boolean(result.aggregates || result.totals));
+          (params.needsGrandTotal ||
+            Boolean(result.aggregates || result.totals));
 
         const grandTotalData = includeGrandTotal
           ? buildGrandTotalData(valueCols, result.aggregates, result.totals)
@@ -165,6 +230,77 @@ export function createPerspectiveDatasource(
             : {}),
           ...(grandTotalData ? { grandTotalData } : {}),
         });
+
+        if (blockCache) {
+          prefetchNeighbor(keyParts, 1);
+          prefetchNeighbor(keyParts, -1);
+        }
+      };
+
+      // Sync path: main-thread cache hit → no Loading flash.
+      if (blockCache && extras.isConfigured) {
+        const hit = blockCache.get(cacheKey);
+        if (hit) {
+          deliver(hit);
+          return;
+        }
+      }
+
+      const run = async () => {
+        // Cold mounts fire getRows before configure+setRowData. Waiting avoids
+        // a permanent ERR cell from params.fail() on an empty/unindexed table.
+        for (let i = 0; i < 400; i++) {
+          if (getExtras?.().isConfigured) break;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        if (!getExtras?.().isConfigured) {
+          params.fail();
+          return;
+        }
+
+        const load = async (): Promise<CachedGetRows> => {
+          const result = await client.getRows({
+            dataset: getDataset(),
+            startRow,
+            endRow,
+            rowGroupCols: (req.rowGroupCols ?? []).map((c) => ({
+              id: c.id,
+              field: c.field ?? "",
+              displayName: c.displayName ?? "",
+            })),
+            valueCols,
+            pivotCols: (req.pivotCols ?? []).map((c) => ({
+              id: c.id,
+              field: c.field ?? "",
+              displayName: c.displayName ?? "",
+            })),
+            pivotMode: Boolean(req.pivotMode),
+            groupKeys: req.groupKeys ?? [],
+            filterModel: (req.filterModel ?? {}) as Record<string, unknown>,
+            sortModel: (req.sortModel ?? []).map((s) => ({
+              colId: s.colId,
+              sort: s.sort as "asc" | "desc",
+            })),
+            quickFilterText: extras.quickFilterText,
+            quickFilterFields: extras.quickFilterFields,
+            treeData: extras.treeData,
+            absSort: extras.absSort,
+            rowKeepExpression: extras.rowKeepExpression,
+          });
+          return toCached(result);
+        };
+
+        const result = blockCache
+          ? await blockCache.getOrLoad(cacheKey, load)
+          : await load();
+
+        const currentGen = getExtras?.().refreshGeneration ?? 0;
+        if (generationAtStart !== currentGen) {
+          params.fail();
+          return;
+        }
+
+        deliver(result);
       };
 
       void run().catch((err) => {

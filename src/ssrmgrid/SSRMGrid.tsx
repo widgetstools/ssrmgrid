@@ -37,6 +37,7 @@ import {
   type DirtyMessage,
 } from "../ssrm/applyWorkerDirtyToGrid";
 import { refreshAllLoadedServerSideStores } from "../ssrm/refreshAllLoadedStores";
+import { SsrmBlockCache } from "../ssrm/ssrmBlockCache";
 import type { FeedConfig } from "../ssrm/types";
 import { createWorkerClient } from "../ssrm/workerClient";
 import {
@@ -298,6 +299,11 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const tickQuietUntilRef = useRef(0);
     /** Bumped on every purge refresh; datasource drops older-generation blocks. */
     const refreshGenerationRef = useRef(0);
+    /**
+     * Main-thread SSRM block cache — sync `params.success` on hit / prefetch.
+     * Cleared on dirty + purge so live ticks never re-serve stale slices.
+     */
+    const blockCacheRef = useRef(new SsrmBlockCache());
     const gridReadyRef = useRef(false);
     const configuredRef = useRef(false);
     /** True while chunked snapshot ingest is in flight — suppress dirty purges. */
@@ -483,6 +489,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       }) => {
         const api = apiRef.current;
         if (!api) return;
+        blockCacheRef.current.clear();
         if (opts?.bumpGeneration !== false) {
           refreshGenerationRef.current += 1;
         }
@@ -541,6 +548,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
               `Σ ${filteredRowCount.toLocaleString()} rows · ${formatTotals(totals)}`,
             );
           },
+          blockCacheRef.current,
         ),
       [treeData],
     );
@@ -558,6 +566,8 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         if (!configuredRef.current || ingestingRef.current) return;
         const api = apiRef.current;
         if (!api) return;
+        // Drop main-thread slices before soft/purge refresh so ticks stay live.
+        blockCacheRef.current.clear();
         const mode = applyWorkerDirtyToGrid(msg, {
           throttleRefresh: () => throttleRef.current?.(),
           purgeRefresh: () =>
@@ -581,6 +591,8 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         if (typingQuietRef.current) return;
         if (Date.now() < tickQuietUntilRef.current) return;
         if (apiRef.current) {
+          // Soft refresh re-queries; clear so we don't sync-serve pre-tick rows.
+          blockCacheRef.current.clear();
           refreshAllLoadedServerSideStores(apiRef.current, { purge: false });
         }
       }, props.refreshThrottleMs ?? 150);
