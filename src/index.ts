@@ -15,3 +15,4 @@ export {
   shareExceeds,
   resolveAggregate,
 } from './ssrm/shareOfTotal';
+export { foldTrafficLight, isTrafficLightAgg } from './ssrm/trafficLightAgg';
