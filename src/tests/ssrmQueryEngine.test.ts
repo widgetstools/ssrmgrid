@@ -547,9 +547,10 @@ describe("getQuickFilterColumns", () => {
     ]);
   });
 
-  it("restricts to the provided field list", () => {
+  it("honors provided field list including non-string schema cols", () => {
     expect(getQuickFilterColumns("positions", ["desk", "pnl"])).toEqual([
       "desk",
+      "pnl",
     ]);
   });
 });

@@ -239,17 +239,8 @@ export default function App() {
           getRowId="id"
           onTotals={setTotals}
           quickFilterText={quickFilter}
-          quickFilterFields={[
-            "book",
-            "desk",
-            "trader",
-            "region",
-            "currency",
-            "instrumentType",
-            "issuer",
-            "ticker",
-            "cusip",
-          ]}
+          // Omit quickFilterFields → all string columns (CSRM-like). Tokens are
+          // AND'd across words ("Rates Chen" matches book+trader).
           enableCharts
           enableCellChangeFlash
           grandTotalRow="bottom"

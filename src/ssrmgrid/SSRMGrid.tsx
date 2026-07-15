@@ -61,7 +61,10 @@ import { fetchAllGroupLeafRows, toGroupLeafCols } from "../ssrm/getGroupLeafRows
 import { PIVOT_FIELD_SEPARATOR } from "../workers/ssrmQueryEngine";
 import { foldTrafficLight } from "../ssrm/trafficLightAgg";
 import { buildColumnOverride, type SSRMColDef } from "./columnOverride";
+import { QuickFilterHighlightCellRenderer } from "./QuickFilterHighlightCellRenderer";
+import "./quickFilterHighlight.css";
 import { SSRM_DEFAULT_STATUS_BAR } from "./ssrmStatusBarPanels";
+import { parseQuickFilterTokens } from "../workers/ssrmFilters";
 
 const DATASET = "main";
 
@@ -246,6 +249,11 @@ export interface SSRMGridProps {
    * columns from the schema.
    */
   quickFilterFields?: string[];
+  /**
+   * Mark matching substrings in cell text while quick filter is active.
+   * Default **true**. Column-specific `cellRenderer`s still win over the default.
+   */
+  highlightQuickFilter?: boolean;
   /** Enable server-side pagination. */
   pagination?: boolean;
   paginationPageSize?: number;
@@ -901,6 +909,25 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [feedConfig]);
 
+    // Push quick-filter tokens into context and re-paint marks immediately
+    // (filter purge stays debounced below).
+    useEffect(() => {
+      const api = apiRef.current;
+      if (!gridReadyRef.current || !api) return;
+      const tokens = parseQuickFilterTokens(props.quickFilterText);
+      const highlight = props.highlightQuickFilter !== false;
+      api.setGridOption("context", {
+        ...(api.getGridOption("context") as object | undefined),
+        rowMirror: rowMirrorRef.current,
+        quickFilterText: props.quickFilterText ?? "",
+        quickFilterTokens: tokens,
+        highlightQuickFilter: highlight,
+      });
+      if (highlight) {
+        api.refreshCells({ force: true });
+      }
+    }, [props.quickFilterText, props.highlightQuickFilter]);
+
     // Quick filter / abs sort / row-keep changes: server-side re-query (debounced).
     const appliedQuickFilterRef = useRef(props.quickFilterText ?? "");
     const appliedAbsSortRef = useRef(props.absSort ?? false);
@@ -1257,16 +1284,33 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         ...((props.showLoadingOverlay ?? false)
           ? {}
           : { loadingCellRenderer: MirrorLoadingCellRenderer }),
+        // Mark quick-filter hits in cell text (col-specific cellRenderer wins).
+        ...(props.highlightQuickFilter === false
+          ? {}
+          : { cellRenderer: QuickFilterHighlightCellRenderer }),
         ...props.defaultColDef,
       }),
-      [props.defaultColDef, props.enableCellChangeFlash, props.showLoadingOverlay],
+      [
+        props.defaultColDef,
+        props.enableCellChangeFlash,
+        props.showLoadingOverlay,
+        props.highlightQuickFilter,
+      ],
     );
 
     // The auto group column needs real width or the group key clips to just the
     // "(count)". Consumers can override via defaultColDef-style width if needed.
     const autoGroupColumnDef = useMemo<ColDef>(
-      () => ({ headerName: "Group", minWidth: 240, flex: 1, pinned: "left" }),
-      [],
+      () => ({
+        headerName: "Group",
+        minWidth: 240,
+        flex: 1,
+        pinned: "left",
+        ...(props.highlightQuickFilter === false
+          ? {}
+          : { cellRenderer: QuickFilterHighlightCellRenderer }),
+      }),
+      [props.highlightQuickFilter],
     );
     const sideBar = useMemo(
       () => props.sideBar ?? { toolPanels: ["columns", "filters"] },
@@ -1383,6 +1427,9 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
               rowMirror: rowMirrorRef.current,
               ssrmCountMatching: countMatching,
               ssrmConfigured: configuredRef.current,
+              quickFilterText: props.quickFilterText ?? "",
+              quickFilterTokens: parseQuickFilterTokens(props.quickFilterText),
+              highlightQuickFilter: props.highlightQuickFilter !== false,
             });
             // feedConfig effect already owns configureAndLoad. Re-entering here
             // (or purging again after it finishes) is what made CSRM→SSRM

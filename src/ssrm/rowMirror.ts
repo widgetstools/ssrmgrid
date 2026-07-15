@@ -2,6 +2,7 @@ import {
   filterPlanIsMainThreadSafe,
   mapFilterModel,
   rowMatchesFilterPlan,
+  rowMatchesQuickFilter,
   type PerspectiveFilter,
 } from "../workers/ssrmFilters";
 import {
@@ -254,7 +255,6 @@ export class RowMirror {
       ancestorFilters.push([field, "==", groupKeys[i]!]);
     }
 
-    const q = (req.quickFilterText ?? "").trim().toLowerCase();
     const qFields = req.quickFilterFields;
 
     return this.all.filter((row) => {
@@ -262,18 +262,11 @@ export class RowMirror {
         if (!rowMatchesFilterPlan({ filters: [f] }, row)) return false;
       }
       if (!rowMatchesFilterPlan(plan, row)) return false;
-      if (q) {
-        const fields =
-          qFields && qFields.length > 0
-            ? qFields
-            : Object.keys(row).filter((k) => k !== this.idField);
-        const hit = fields.some((field) =>
-          String(row[field] ?? "")
-            .toLowerCase()
-            .includes(q),
-        );
-        if (!hit) return false;
-      }
+      const fields =
+        qFields && qFields.length > 0
+          ? qFields
+          : Object.keys(row).filter((k) => k !== this.idField);
+      if (!rowMatchesQuickFilter(row, req.quickFilterText, fields)) return false;
       return true;
     });
   }

@@ -125,20 +125,70 @@ function orExpressionPlan(
 }
 
 /**
- * Server-side quick filter: case-insensitive contains across text columns.
- * OR of per-column match(lower(...)) — Perspective 3.8 rejects lower(concat(...))
- * in practice (SSRM fail/"ERR"); narrowing columns via getQuickFilterColumns is
- * the primary query-cost win.
+ * CSRM-compatible quick-filter tokenization.
+ * Splits on whitespace; `"quoted phrases"` stay intact (AG Grid quickFilterParser).
+ */
+export function parseQuickFilterTokens(
+  text: string | null | undefined,
+): string[] {
+  const raw = (text ?? "").trim();
+  if (!raw) return [];
+  const tokens: string[] = [];
+  const re = /"([^"]+)"|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) != null) {
+    const tok = (m[1] ?? m[2] ?? "").trim().toLowerCase();
+    if (tok) tokens.push(tok);
+  }
+  return tokens;
+}
+
+/**
+ * Whether a row matches quick filter text (CSRM semantics):
+ * every token must appear in at least one of `fields` (case-insensitive contains).
+ */
+export function rowMatchesQuickFilter(
+  row: Record<string, unknown>,
+  text: string | null | undefined,
+  fields: string[],
+): boolean {
+  const tokens = parseQuickFilterTokens(text);
+  if (tokens.length === 0) return true;
+  if (fields.length === 0) return true;
+  const values = fields.map((f) => String(row[f] ?? "").toLowerCase());
+  return tokens.every((tok) => values.some((v) => v.includes(tok)));
+}
+
+/**
+ * Server-side quick filter — CSRM semantics:
+ * - text is split into tokens (words / "quoted phrases")
+ * - each token is OR'd across columns (contains)
+ * - tokens are AND'd together
+ *
+ * Perspective 3.8 rejects lower(concat(...)) in practice; per-column match()
+ * with getQuickFilterColumns narrowing is the query-cost win.
  */
 export function quickFilterToPlan(
   text: string | null | undefined,
   stringColumns: string[],
 ): FilterPlan {
-  const needle = (text ?? "").trim().toLowerCase();
-  if (!needle || stringColumns.length === 0) return {};
-  const parts = stringColumns.map((field) => containsExpr(`"${field}"`, needle));
+  const tokens = parseQuickFilterTokens(text);
+  if (tokens.length === 0 || stringColumns.length === 0) return {};
+
+  // (c1~t1 or c2~t1 or ...) and (c1~t2 or c2~t2 or ...)
+  const tokenClauses = tokens.map((tok) => {
+    const ors = stringColumns.map((field) =>
+      containsExpr(`"${field}"`, tok),
+    );
+    return ors.length === 1 ? ors[0]! : `(${ors.join(" or ")})`;
+  });
+  const expr =
+    tokenClauses.length === 1
+      ? tokenClauses[0]!
+      : tokenClauses.join(" and ");
+
   return {
-    expressions: { [QUICK_FILTER_EXPR]: parts.join(" or ") },
+    expressions: { [QUICK_FILTER_EXPR]: expr },
     filters: [[QUICK_FILTER_EXPR, "==", true]],
     filterOp: "and",
   };

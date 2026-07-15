@@ -1,0 +1,13 @@
+/* Quick-filter match marks — readable on light + dark AG Grid themes */
+.ssrm-qf-cell mark.ssrm-qf-mark {
+  background: color-mix(in srgb, #f5d76e 75%, transparent);
+  color: inherit;
+  padding: 0 0.05em;
+  border-radius: 2px;
+  font: inherit;
+}
+
+[data-ag-theme-mode="dark"] .ssrm-qf-cell mark.ssrm-qf-mark,
+.ag-theme-quartz-dark .ssrm-qf-cell mark.ssrm-qf-mark {
+  background: color-mix(in srgb, #e6b800 55%, transparent);
+}

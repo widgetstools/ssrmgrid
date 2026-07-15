@@ -90,20 +90,22 @@ export function getStringColumns(dataset: DatasetId): string[] {
 }
 
 /**
- * String columns searched by quick filter. Excludes the dataset primary key
- * (IDs rarely belong in "search"). Optional `fields` further restricts the set.
+ * Columns searched by quick filter. Excludes the dataset primary key.
+ * Default: string columns. When `fields` is provided, honor that list for any
+ * schema type (Perspective `string(col)` makes numerics searchable too).
  */
 export function getQuickFilterColumns(
   dataset: DatasetId,
   fields?: string[],
 ): string[] {
   const pk = getDatasetPrimaryKey(dataset);
-  const stringCols = getStringColumns(dataset).filter((k) => k !== pk);
+  const schema = schemaOf(dataset);
   if (fields && fields.length > 0) {
-    const allowed = new Set(fields);
-    return stringCols.filter((k) => allowed.has(k));
+    return fields.filter((k) => k !== pk && k in schema);
   }
-  return stringCols;
+  return Object.entries(schema)
+    .filter(([k, t]) => k !== pk && t === "string")
+    .map(([k]) => k);
 }
 
 const AGG_FUNC_MAP: Record<string, string> = {

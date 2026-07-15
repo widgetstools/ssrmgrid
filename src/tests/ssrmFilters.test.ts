@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   applyPostPredicate,
   mapFilterModel,
+  parseQuickFilterTokens,
   quickFilterToPlan,
   rowKeepExpressionToPlan,
+  rowMatchesQuickFilter,
   simpleConditionToFilters,
 } from "../workers/ssrmFilters";
 
@@ -183,6 +185,32 @@ describe("mapFilterModel", () => {
   });
 });
 
+describe("parseQuickFilterTokens", () => {
+  it("splits words and keeps quoted phrases", () => {
+    expect(parseQuickFilterTokens("Tony Ireland")).toEqual(["tony", "ireland"]);
+    expect(parseQuickFilterTokens('"Rates A" Chen')).toEqual([
+      "rates a",
+      "chen",
+    ]);
+  });
+});
+
+describe("rowMatchesQuickFilter", () => {
+  it("ANDs tokens across columns (CSRM semantics)", () => {
+    const row = { book: "Rates-A", trader: "A. Chen" };
+    expect(rowMatchesQuickFilter(row, "Rates Chen", ["book", "trader"])).toBe(
+      true,
+    );
+    expect(rowMatchesQuickFilter(row, "Rates Bond", ["book", "trader"])).toBe(
+      false,
+    );
+    // Whole-string contains would miss this; tokenization must win.
+    expect(rowMatchesQuickFilter(row, "Rates Chen", ["book", "trader"])).toBe(
+      true,
+    );
+  });
+});
+
 describe("quickFilterToPlan", () => {
   it("builds an OR of case-insensitive contains across text columns", () => {
     const plan = quickFilterToPlan("usd", ["desk", "currency", "ticker"]);
@@ -191,6 +219,15 @@ describe("quickFilterToPlan", () => {
     expect(expr).toContain('match(lower(string("desk"))');
     expect(expr).toContain('match(lower(string("currency"))');
     expect(expr).toContain(" or ");
+  });
+
+  it("ANDs multiple tokens (each OR'd across columns)", () => {
+    const plan = quickFilterToPlan("tony ireland", ["name", "country"]);
+    const expr = plan.expressions?.__ssrm_quick_filter ?? "";
+    expect(expr).toContain(" and ");
+    expect(expr).toContain("tony");
+    expect(expr).toContain("ireland");
+    expect(expr.startsWith("(")).toBe(true);
   });
 
   it("returns empty plan for blank quick filter", () => {

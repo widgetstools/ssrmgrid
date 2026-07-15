@@ -91,6 +91,37 @@ describe("RowMirror", () => {
     expect(slice?.rowData.map((r) => r.id)).toEqual(["3", "1"]);
   });
 
+  it("quick filter ANDs tokens across columns under grouping", () => {
+    const mirror = new RowMirror();
+    mirror.replaceAll(
+      [
+        { id: "1", book: "Rates-A", trader: "A. Chen", pnl: 10 },
+        { id: "2", book: "Credit-B", trader: "A. Chen", pnl: 5 },
+        { id: "3", book: "Rates-A", trader: "N. Williams", pnl: 30 },
+      ],
+      "id",
+    );
+    const slice = mirror.tryGetRows({
+      startRow: 0,
+      endRow: 100,
+      rowGroupCols: [{ id: "book", field: "book" }],
+      groupKeys: [],
+      pivotMode: false,
+      filterModel: {},
+      sortModel: [],
+      valueCols: [{ id: "pnl", field: "pnl", aggFunc: "sum" }],
+      quickFilterText: "Rates Chen",
+      quickFilterFields: ["book", "trader"],
+    });
+    // Only id=1 matches both tokens → one group Rates-A with childCount 1.
+    expect(slice?.rowCount).toBe(1);
+    expect(slice?.rowData[0]).toMatchObject({
+      __ssrmGroupKey: "Rates-A",
+      childCount: 1,
+      pnl: 10,
+    });
+  });
+
   it("serves group header rows with aggregates synchronously", () => {
     const mirror = new RowMirror();
     mirror.replaceAll(
