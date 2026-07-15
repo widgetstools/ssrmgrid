@@ -33,6 +33,10 @@ import {
 import { getActiveFilterModel } from "../ssrm/activeFilterModel";
 import { chartAllViaAgGrid } from "../ssrm/chartAllViaAgGrid";
 import { exportAllViaAgGrid } from "../ssrm/exportAllViaAgGrid";
+import {
+  applyWorkerDirtyToGrid,
+  type DirtyMessage,
+} from "../ssrm/applyWorkerDirtyToGrid";
 import { refreshAllLoadedServerSideStores } from "../ssrm/refreshAllLoadedStores";
 import type { FeedConfig } from "../ssrm/types";
 import { createWorkerClient } from "../ssrm/workerClient";
@@ -184,6 +188,13 @@ export interface SSRMGridProps {
   defaultColDef?: ColDef;
   /** Called with a short summary string of filtered totals after each refresh. */
   onTotals?: (summary: string) => void;
+  /**
+   * Fired when the Perspective worker reports data changed (`dirty`).
+   * Grid refresh is handled internally; hosts may observe for analytics or
+   * worker-originated feeds. Do not republish into RowChangeBus if the host
+   * already published on `applyTransaction` (double alerts).
+   */
+  onDirty?: (msg: DirtyMessage) => void;
   /** Grid host height (default 100%). */
   height?: string | number;
   /**
@@ -473,6 +484,11 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const purgeRefreshStoresRef = useRef(purgeRefreshStores);
     purgeRefreshStoresRef.current = purgeRefreshStores;
 
+    const onDirtyRef = useRef(props.onDirty);
+    onDirtyRef.current = props.onDirty;
+    const refreshTotalsRef = useRef(refreshTotals);
+    refreshTotalsRef.current = refreshTotals;
+
     const datasource = useMemo(
       () =>
         createPerspectiveDatasource(
@@ -508,6 +524,19 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     useEffect(() => {
       const client = createWorkerClient();
       clientRef.current = client;
+      client.setDirtyHandler((msg) => {
+        onDirtyRef.current?.(msg);
+        const api = apiRef.current;
+        if (!api) return;
+        const mode = applyWorkerDirtyToGrid(api, msg, {
+          throttleRefresh: () => throttleRef.current?.(),
+          purgeRefresh: () => purgeRefreshStoresRef.current(),
+        });
+        // Purge path already refreshes totals inside purgeRefreshStores.
+        if (mode === "surgical") {
+          void refreshTotalsRef.current();
+        }
+      });
       return () => {
         client.dispose();
         clientRef.current = null;
@@ -584,12 +613,9 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       }
       const client = clientRef.current;
       if (!client || !configuredRef.current) return;
-      void client.setRowData(DATASET, rowData ?? []).then(() => {
-        if (apiRef.current) {
-          purgeRefreshStores();
-        }
-      });
-    }, [rowData, purgeRefreshStores]);
+      // Worker emits `dirty` → purge refresh; no local .then refresh.
+      void client.setRowData(DATASET, rowData ?? []);
+    }, [rowData]);
 
     // Normalize a transaction's `remove` to id list (id field or object).
     const removeIds = useCallback(
@@ -606,19 +632,15 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       (tx: SSRMTransaction) => {
         const client = clientRef.current;
         if (!client) return;
-        void client
-          .applyTransaction({
-            dataset: DATASET,
-            add: tx.add,
-            update: tx.update,
-            remove: removeIds(tx.remove),
-          })
-          .then(() => {
-            throttleRef.current?.();
-            void refreshTotals();
-          });
+        // UI refresh + totals come from the worker `dirty` event after mutate.
+        void client.applyTransaction({
+          dataset: DATASET,
+          add: tx.add,
+          update: tx.update,
+          remove: removeIds(tx.remove),
+        });
       },
-      [removeIds, refreshTotals],
+      [removeIds],
     );
 
     const handleChartAll = useCallback(

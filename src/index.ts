@@ -7,6 +7,7 @@ export type {
   GroupTotalRowMode,
 } from './ssrmgrid/SSRMGrid';
 export type { SSRMColDef } from './ssrmgrid/columnOverride';
+export type { DirtyMessage } from './ssrm/applyWorkerDirtyToGrid';
 export {
   shareOfTotal,
   shareOfAggregate,
