@@ -168,18 +168,35 @@ export function generateRows(count: number): DemoRow[] {
 }
 
 /**
- * Start ticking. Every ~50ms, mutate `perTick` random rows' measures and call
- * `onTick` with the (partial) updated rows. `ratePerSec` controls how many rows
- * change per second. Returns a stop function.
+ * Pick a cadence so each batch stays bounded (~≤1500 rows) while still hitting
+ * the target rows/sec. High rates use ~16ms; low rates stretch toward 50ms.
+ */
+function tickIntervalMs(ratePerSec: number): number {
+  if (ratePerSec <= 0) return 50;
+  if (ratePerSec >= 10_000) return 16;
+  if (ratePerSec >= 3_000) return 25;
+  return 50;
+}
+
+/**
+ * Start ticking. Mutate random rows' measures at `ratePerSec` and call `onTick`
+ * with partial updated rows. Returns a stop function.
  */
 export function startTicking(
   rows: DemoRow[],
   ratePerSec: number,
   onTick: (updated: Partial<DemoRow>[]) => void,
 ): () => void {
+  if (ratePerSec <= 0 || rows.length === 0) {
+    return () => undefined;
+  }
   const rng = lcg(7);
-  const intervalMs = 50;
-  const perTick = Math.max(1, Math.round((ratePerSec * intervalMs) / 1000));
+  const intervalMs = tickIntervalMs(ratePerSec);
+  // Cap batch size so a single applyTransactionAsync does not freeze the UI.
+  const perTick = Math.max(
+    1,
+    Math.min(1_500, Math.round((ratePerSec * intervalMs) / 1000)),
+  );
   const handle = window.setInterval(() => {
     const updates: Partial<DemoRow>[] = [];
     for (let k = 0; k < perTick; k++) {
