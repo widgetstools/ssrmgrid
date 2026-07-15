@@ -152,6 +152,22 @@ export interface SSRMGridProps {
   getRowId: string;
   /** Live-refresh throttle in ms (default 150). */
   refreshThrottleMs?: number;
+  /**
+   * SSRM rows per fetched block (default 250). Larger = fewer getRows while
+   * scrolling; smaller = snappier first paint.
+   */
+  cacheBlockSize?: number;
+  /**
+   * Wait this many ms after scrolling before loading a block (default 100).
+   * Lets fast wheel/trackpad/thumb scrolls skip over intermediate blocks so
+   * the viewport does not flash Loading on every block.
+   */
+  blockLoadDebounceMillis?: number;
+  /**
+   * Max cached SSRM blocks (default 40). Higher keeps more off-screen rows
+   * warm when scrolling back.
+   */
+  maxBlocksInCache?: number;
   /** Passthrough default column def. */
   defaultColDef?: ColDef;
   /** Called with a short summary string of filtered totals after each refresh. */
@@ -1030,6 +1046,9 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         enableRowGroup: true,
         enablePivot: true,
         enableCellChangeFlash: true,
+        // With suppressServerSideFullWidthLoadingRow, avoid per-cell "Loading…"
+        // text during fast scroll / block fetch (blank skeleton instead).
+        loadingCellRenderer: () => "",
         ...props.defaultColDef,
       }),
       [props.defaultColDef],
@@ -1087,8 +1106,14 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           autoGroupColumnDef={autoGroupColumnDef}
           rowModelType="serverSide"
           serverSideDatasource={datasource}
-          cacheBlockSize={100}
-          animateRows
+          cacheBlockSize={props.cacheBlockSize ?? 250}
+          blockLoadDebounceMillis={props.blockLoadDebounceMillis ?? 100}
+          maxBlocksInCache={props.maxBlocksInCache ?? 40}
+          maxConcurrentDatasourceRequests={2}
+          // Fast scroll: skip full-width "Loading" rows; cells stay blank until
+          // the debounced block arrives (see defaultColDef.loadingCellRenderer).
+          suppressServerSideFullWidthLoadingRow
+          animateRows={false}
           rowHeight={props.rowHeight}
           headerHeight={props.headerHeight}
           cellFlashDuration={500}
