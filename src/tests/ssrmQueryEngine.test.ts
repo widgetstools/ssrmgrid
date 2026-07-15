@@ -591,6 +591,23 @@ describe("mapSsrmRequestToView tree + quick filter + calc cols", () => {
     ]);
   });
 
+  it("attaches rowKeepExpression as __ssrm_row_keep", () => {
+    const mapped = mapSsrmRequestToView(
+      makeRequest({
+        rowGroupCols: [],
+        rowKeepExpression: 'not("ccy" == \'INR\')',
+      }),
+      COUNT_AGG_FIELD,
+      "positions",
+    );
+    expect(mapped.viewConfig.expressions?.__ssrm_row_keep).toBe(
+      'not("ccy" == \'INR\')',
+    );
+    expect(mapped.viewConfig.filter).toEqual([
+      ["__ssrm_row_keep", "==", true],
+    ]);
+  });
+
   it("honors quickFilterFields restriction", () => {
     const mapped = mapSsrmRequestToView(
       makeRequest({

@@ -10,6 +10,8 @@ export function escapePerspectiveString(value: string): string {
 /** Synthetic boolean column used for OR / quick-filter expression match. */
 export const OR_MATCH_EXPR = "__ssrm_or_match";
 export const QUICK_FILTER_EXPR = "__ssrm_quick_filter";
+/** Synthetic boolean column: host-supplied keep predicate (e.g. row-exclusion). */
+export const ROW_KEEP_EXPR = "__ssrm_row_keep";
 export const ABS_SORT_PREFIX = "__ssrm_abs_";
 
 export function absSortExprName(field: string): string {

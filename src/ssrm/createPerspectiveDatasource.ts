@@ -61,6 +61,7 @@ export function createPerspectiveDatasource(
     quickFilterFields?: string[];
     treeData?: boolean;
     absSort?: boolean;
+    rowKeepExpression?: string;
     /** Bumped on purge refresh; drop block results from an older generation. */
     refreshGeneration?: number;
     /**
@@ -131,6 +132,7 @@ export function createPerspectiveDatasource(
           quickFilterFields: extras.quickFilterFields,
           treeData: extras.treeData,
           absSort: extras.absSort,
+          rowKeepExpression: extras.rowKeepExpression,
         });
 
         const currentGen = getExtras?.().refreshGeneration ?? 0;

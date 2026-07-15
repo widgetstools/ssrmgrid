@@ -23,6 +23,7 @@ import {
   mapFilterModel,
   mergeFilterPlans,
   quickFilterToPlan,
+  rowKeepExpressionToPlan,
   type PerspectiveFilter,
 } from "./ssrmFilters";
 import { aggregateAlias, collectAggregateSpecs } from "./sumTotals";
@@ -62,6 +63,7 @@ function aggregateCacheKey(request: AggregateRequest): string {
     f: request.filterModel ?? {},
     q: request.quickFilterText ?? "",
     qf: request.quickFilterFields ?? [],
+    k: request.rowKeepExpression ?? "",
     s: specs,
   });
 }
@@ -621,6 +623,7 @@ export function createPerspectiveHost(
             request.quickFilterText,
             getQuickFilterColumns(dataset, request.quickFilterFields),
           ),
+          rowKeepExpressionToPlan(request.rowKeepExpression),
         ],
         "and",
       );
@@ -868,6 +871,7 @@ export function createPerspectiveHost(
             request.quickFilterText,
             getQuickFilterColumns(dataset, request.quickFilterFields),
           ),
+          rowKeepExpressionToPlan(request.rowKeepExpression),
         ],
         "and",
       );

@@ -61,6 +61,11 @@ export interface SsrmGetRowsRequest {
   treeData?: boolean;
   /** Absolute-value sort for numeric measure columns. */
   absSort?: boolean;
+  /**
+   * Perspective boolean expression: rows where truthy are kept (AND with
+   * other filters). Used for SSRM row-exclusion keep predicates.
+   */
+  rowKeepExpression?: string;
 }
 
 export interface SsrmGetRowsResult {
@@ -90,6 +95,8 @@ export interface AggregateRequest {
   quickFilterText?: string;
   /** Restrict quick filter to these string fields (default: all non-PK strings). */
   quickFilterFields?: string[];
+  /** Perspective keep predicate (see SsrmGetRowsRequest.rowKeepExpression). */
+  rowKeepExpression?: string;
 }
 
 export interface AggregateResult {
@@ -111,6 +118,8 @@ export interface QueryAllRequest {
   limit?: number | null;
   quickFilterText?: string;
   quickFilterFields?: string[];
+  /** Perspective keep predicate (see SsrmGetRowsRequest.rowKeepExpression). */
+  rowKeepExpression?: string;
   /** When true (default false), include current group/pivot structure. */
   includeStructure?: boolean;
   rowGroupCols?: SsrmGetRowsRequest["rowGroupCols"];
@@ -137,6 +146,8 @@ export interface SeriesDataRequest {
   quickFilterText?: string;
   /** Restrict quick filter to these string fields (default: all non-PK strings). */
   quickFilterFields?: string[];
+  /** Perspective keep predicate (see SsrmGetRowsRequest.rowKeepExpression). */
+  rowKeepExpression?: string;
   limit?: number;
 }
 

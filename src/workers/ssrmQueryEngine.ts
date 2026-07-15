@@ -20,6 +20,7 @@ import {
   mapFilterModel,
   mergeFilterPlans,
   quickFilterToPlan,
+  rowKeepExpressionToPlan,
   type FilterPlan,
   type PerspectiveFilter,
 } from "./ssrmFilters";
@@ -591,7 +592,11 @@ export function mapSsrmRequestToView(
     request.quickFilterText,
     getQuickFilterColumns(resolvedDataset, request.quickFilterFields),
   );
-  const combinedPlan = mergeFilterPlans([columnFilters, quickPlan], "and");
+  const keepPlan = rowKeepExpressionToPlan(request.rowKeepExpression);
+  const combinedPlan = mergeFilterPlans(
+    [columnFilters, quickPlan, keepPlan],
+    "and",
+  );
   const filterExtras = mergeFilters(ancestorFilters, combinedPlan);
   const { filter, filter_op, postPredicate, expressions: filterExprs } =
     filterExtras;

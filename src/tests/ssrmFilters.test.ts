@@ -4,6 +4,7 @@ import {
   applyPostPredicate,
   mapFilterModel,
   quickFilterToPlan,
+  rowKeepExpressionToPlan,
   simpleConditionToFilters,
 } from "../workers/ssrmFilters";
 
@@ -194,5 +195,19 @@ describe("quickFilterToPlan", () => {
 
   it("returns empty plan for blank quick filter", () => {
     expect(quickFilterToPlan("  ", ["desk"])).toEqual({});
+  });
+});
+
+describe("rowKeepExpressionToPlan", () => {
+  it("wraps a Perspective keep expression as a boolean column filter", () => {
+    const plan = rowKeepExpressionToPlan('not("ccy" == \'INR\')');
+    expect(plan.filters).toEqual([["__ssrm_row_keep", "==", true]]);
+    expect(plan.expressions?.__ssrm_row_keep).toBe('not("ccy" == \'INR\')');
+    expect(plan.filterOp).toBe("and");
+  });
+
+  it("returns empty plan for blank keep expression", () => {
+    expect(rowKeepExpressionToPlan("  ")).toEqual({});
+    expect(rowKeepExpressionToPlan(undefined)).toEqual({});
   });
 });

@@ -8,6 +8,7 @@ import {
   escapePerspectiveString,
   OR_MATCH_EXPR,
   QUICK_FILTER_EXPR,
+  ROW_KEEP_EXPR,
 } from "./perspectiveExpr";
 
 export type PerspectiveFilter = [
@@ -139,6 +140,23 @@ export function quickFilterToPlan(
   return {
     expressions: { [QUICK_FILTER_EXPR]: parts.join(" or ") },
     filters: [[QUICK_FILTER_EXPR, "==", true]],
+    filterOp: "and",
+  };
+}
+
+/**
+ * Host-supplied Perspective boolean expression: rows where the expression is
+ * truthy are kept (AND'd with column / quick filters). Used for SSRM
+ * row-exclusion (`not(excludePredicate)`).
+ */
+export function rowKeepExpressionToPlan(
+  expression: string | null | undefined,
+): FilterPlan {
+  const expr = (expression ?? "").trim();
+  if (!expr) return {};
+  return {
+    expressions: { [ROW_KEEP_EXPR]: expr },
+    filters: [[ROW_KEEP_EXPR, "==", true]],
     filterOp: "and",
   };
 }

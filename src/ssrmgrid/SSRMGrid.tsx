@@ -199,6 +199,11 @@ export interface SSRMGridProps {
   advancedFilter?: boolean;
   /** Absolute-value sort for numeric measures. */
   absSort?: boolean;
+  /**
+   * Perspective boolean keep expression (AND with filters). Used by MarketsGrid
+   * row-exclusion under SSRM (`not(excludePredicate)`).
+   */
+  rowKeepExpression?: string;
   /** Pinned rows (passthrough — client-set, independent of the row model). */
   pinnedTopRowData?: Record<string, unknown>[];
   pinnedBottomRowData?: Record<string, unknown>[];
@@ -356,6 +361,8 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     // Live extras threaded into every getRows request (read at call time).
     const quickFilterRef = useRef(props.quickFilterText ?? "");
     quickFilterRef.current = props.quickFilterText ?? "";
+    const rowKeepExpressionRef = useRef(props.rowKeepExpression ?? "");
+    rowKeepExpressionRef.current = props.rowKeepExpression ?? "";
     const quickFilterFieldsRef = useRef(props.quickFilterFields);
     quickFilterFieldsRef.current = props.quickFilterFields;
     const absSortRef = useRef(props.absSort ?? false);
@@ -376,8 +383,11 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         const filterModel = getActiveFilterModel(api);
         const quickFilter = quickFilterRef.current || undefined;
         const quickFilterFields = quickFilterFieldsRef.current;
+        const rowKeep = rowKeepExpressionRef.current || undefined;
         const isFiltered =
-          Object.keys(filterModel).length > 0 || Boolean(quickFilter);
+          Object.keys(filterModel).length > 0 ||
+          Boolean(quickFilter) ||
+          Boolean(rowKeep);
         // Resolve row counts for the status bar via Perspective. Uses NO value
         // columns, so it can't throw on calculated columns the way the full
         // aggregate query can. The total is cached (see totalRowCountRef); only
@@ -400,6 +410,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
                   filterModel,
                   quickFilterText: quickFilter,
                   quickFilterFields,
+                  rowKeepExpression: rowKeep,
                 })
               ).rowCount
             : total;
@@ -427,6 +438,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             filterModel,
             quickFilterText: quickFilter,
             quickFilterFields,
+            rowKeepExpression: rowKeep,
           });
           api.setGridOption("context", {
             ...(api.getGridOption("context") as object | undefined),
@@ -484,6 +496,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             quickFilterFields: quickFilterFieldsRef.current,
             treeData: treeData || undefined,
             absSort: absSortRef.current || undefined,
+            rowKeepExpression: rowKeepExpressionRef.current || undefined,
             refreshGeneration: refreshGenerationRef.current,
             includeGrandTotal: usesNativeGrandTotal(grandTotalRowRef.current),
             isConfigured: configuredRef.current,
@@ -601,6 +614,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           filterModel,
           quickFilterText,
           quickFilterFields: quickFilterFieldsRef.current,
+          rowKeepExpression: rowKeepExpressionRef.current || undefined,
         });
       },
       [],
@@ -694,16 +708,19 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [feedConfig]);
 
-    // Quick filter / abs sort changes: server-side re-query (debounced).
+    // Quick filter / abs sort / row-keep changes: server-side re-query (debounced).
     const appliedQuickFilterRef = useRef(props.quickFilterText ?? "");
     const appliedAbsSortRef = useRef(props.absSort ?? false);
+    const appliedRowKeepRef = useRef(props.rowKeepExpression ?? "");
     useEffect(() => {
       if (!gridReadyRef.current || !apiRef.current) return;
       const quick = props.quickFilterText ?? "";
       const abs = props.absSort ?? false;
+      const keep = props.rowKeepExpression ?? "";
       if (
         quick === appliedQuickFilterRef.current &&
-        abs === appliedAbsSortRef.current
+        abs === appliedAbsSortRef.current &&
+        keep === appliedRowKeepRef.current
       ) {
         return;
       }
@@ -711,6 +728,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       const h = window.setTimeout(() => {
         appliedQuickFilterRef.current = quick;
         appliedAbsSortRef.current = abs;
+        appliedRowKeepRef.current = keep;
         purgeRefreshStoresRef.current({
           refetchTotal: false,
           quietTicksMs: 400,
@@ -720,7 +738,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       return () => {
         window.clearTimeout(h);
       };
-    }, [props.quickFilterText, props.absSort]);
+    }, [props.quickFilterText, props.absSort, props.rowKeepExpression]);
 
     // Push rowData snapshots into the worker after configure.
     // Do not skip the first emission — configureAndLoad often races ahead
@@ -778,6 +796,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           chartType: opts?.chartType,
           quickFilterText: quickFilterRef.current || undefined,
           quickFilterFields: quickFilterFieldsRef.current,
+          rowKeepExpression: rowKeepExpressionRef.current || undefined,
         });
       },
       [props.enableCharts],
@@ -914,6 +933,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           limit: 100_000,
           quickFilterText: quickFilterRef.current,
           quickFilterFields: quickFilterFieldsRef.current,
+          rowKeepExpression: rowKeepExpressionRef.current || undefined,
           treeData,
           absSort: absSortRef.current,
         });

@@ -57,6 +57,7 @@ export async function fetchAllGroupLeafRows(
     filterModel?: Record<string, unknown>;
     quickFilterText?: string;
     quickFilterFields?: string[];
+    rowKeepExpression?: string;
     sortModel?: QueryAllRequest["sortModel"];
   },
 ): Promise<Record<string, unknown>[]> {
@@ -73,6 +74,7 @@ export async function fetchAllGroupLeafRows(
     limit: null,
     quickFilterText: opts.quickFilterText,
     quickFilterFields: opts.quickFilterFields,
+    rowKeepExpression: opts.rowKeepExpression,
     includeStructure: false,
   });
 

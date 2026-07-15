@@ -62,6 +62,7 @@ export async function chartAllViaAgGrid(options: {
   chartType?: ChartType;
   quickFilterText?: string;
   quickFilterFields?: string[];
+  rowKeepExpression?: string;
   limit?: number;
 }): Promise<{ rowCount: number; chartId?: string }> {
   const {
@@ -71,6 +72,7 @@ export async function chartAllViaAgGrid(options: {
     chartType = "groupedColumn",
     quickFilterText,
     quickFilterFields,
+    rowKeepExpression,
     limit = 500,
   } = options;
 
@@ -112,6 +114,7 @@ export async function chartAllViaAgGrid(options: {
     filterModel,
     quickFilterText,
     quickFilterFields,
+    rowKeepExpression,
     limit,
   });
 
