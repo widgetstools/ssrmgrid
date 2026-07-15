@@ -37,6 +37,8 @@ import {
   type DirtyMessage,
 } from "../ssrm/applyWorkerDirtyToGrid";
 import { refreshAllLoadedServerSideStores } from "../ssrm/refreshAllLoadedStores";
+import { ConfiguredGate } from "../ssrm/configuredGate";
+import { mergeLeafUpdateRows } from "../ssrm/mergeLeafUpdateRows";
 import { SsrmBlockCache } from "../ssrm/ssrmBlockCache";
 import type { FeedConfig } from "../ssrm/types";
 import { createWorkerClient } from "../ssrm/workerClient";
@@ -170,6 +172,11 @@ export interface SSRMGridProps {
    * and blank Loading rows when scrolling back (unlike CSRM).
    */
   maxBlocksInCache?: number;
+  /**
+   * Flash cells on value change. Default **false** — high-frequency ticks make
+   * change-flash paint-heavy. Opt in for demos that need visual tick cues.
+   */
+  enableCellChangeFlash?: boolean;
   /** Passthrough default column def. */
   defaultColDef?: ColDef;
   /** Called with a short summary string of filtered totals after each refresh. */
@@ -201,6 +208,12 @@ export interface SSRMGridProps {
   onGridReady?: (event: GridReadyEvent) => void;
   suppressNoRowsOverlay?: boolean;
   overlayNoRowsTemplate?: string;
+  /**
+   * Show AG Grid SSRM loading rows/spinners while blocks fetch.
+   * Default **false** — local Perspective is fast enough that the indicator
+   * mostly flashes blank rows on scroll; cache hits already skip Loading.
+   */
+  showLoadingOverlay?: boolean;
 
   // ---- gap-closing options (all off/absent by default) -------------------
   /** Server-side quick filter (global search across text columns). */
@@ -290,6 +303,11 @@ function formatTotals(totals: Record<string, unknown>): string {
 export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
   function SSRMGrid(props, ref) {
     const { columnDefs, rowData, getRowId: idField } = props;
+    if (import.meta.env.DEV && (!idField || idField.trim() === "")) {
+      console.error(
+        "[SSRMGrid] getRowId is required for SSRM transactions and live updates",
+      );
+    }
     const apiRef = useRef<GridApi | null>(null);
     const clientRef = useRef<ReturnType<typeof createWorkerClient> | null>(null);
     const throttleRef = useRef<(() => void) | null>(null);
@@ -300,10 +318,12 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     /** Bumped on every purge refresh; datasource drops older-generation blocks. */
     const refreshGenerationRef = useRef(0);
     /**
-     * Main-thread SSRM block cache — sync `params.success` on hit / prefetch.
-     * Cleared on dirty + purge so live ticks never re-serve stale slices.
+     * Main-thread SSRM block cache — sync `params.success` on hit.
+     * Cleared on purge / soft-refresh fallback; leaf updates patchRows.
      */
     const blockCacheRef = useRef(new SsrmBlockCache());
+    /** Resolves getRows / filter-value waits without busy-polling. */
+    const configuredGateRef = useRef(new ConfiguredGate());
     const gridReadyRef = useRef(false);
     const configuredRef = useRef(false);
     /** True while chunked snapshot ingest is in flight — suppress dirty purges. */
@@ -319,12 +339,9 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     // list that would wipe selected set-filter values from quick-filter pills.
     const getFilterValues = useCallback(
       async (field: string): Promise<(string | null)[]> => {
-        for (let i = 0; i < 200; i++) {
-          if (configuredRef.current && clientRef.current) break;
-          await new Promise((r) => setTimeout(r, 25));
-        }
+        const ok = await configuredGateRef.current.wait(10_000);
         const client = clientRef.current;
-        if (!client || !configuredRef.current) return [];
+        if (!ok || !client || !configuredRef.current) return [];
         return client.getFilterValues(DATASET, field);
       },
       [],
@@ -524,6 +541,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             refreshGeneration: refreshGenerationRef.current,
             includeGrandTotal: usesNativeGrandTotal(grandTotalRowRef.current),
             isConfigured: configuredRef.current,
+            waitUntilConfigured: () => configuredGateRef.current.wait(10_000),
           }),
           (totals, filteredRowCount, aggregates) => {
             const api = apiRef.current;
@@ -569,14 +587,30 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         const mode = applyWorkerDirtyToGrid(msg, {
           applyLeafTransaction: (leaf) => {
             // In-place SSRM patch — avoids soft-refreshing every loaded block
-            // on each tick (that was the main scroll jank under live updates).
+            // on each tick. AG Grid batches via asyncTransactionWaitMillis.
+            // SSRM `update` replaces row.data — merge partial patches first or
+            // Book/Trader/etc. blank out (ticks only send changed fields).
             if (leaf.update?.length) {
+              // Merge into main-thread cache first, then prefer those rows when
+              // building AG update payloads (SSRM replaces row.data wholesale).
               blockCacheRef.current.patchRows(idField, leaf.update);
+              const update = mergeLeafUpdateRows(
+                idField,
+                leaf.update,
+                (id) =>
+                  blockCacheRef.current.findRow(idField, id) ??
+                  (api.getRowNode(id)?.data as
+                    | Record<string, unknown>
+                    | undefined),
+              );
+              api.applyServerSideTransactionAsync({
+                update,
+                ...(leaf.add?.length ? { add: leaf.add } : {}),
+              });
+            } else if (leaf.add?.length) {
+              blockCacheRef.current.clear();
+              api.applyServerSideTransactionAsync({ add: leaf.add });
             }
-            api.applyServerSideTransaction({
-              ...(leaf.update?.length ? { update: leaf.update } : {}),
-              ...(leaf.add?.length ? { add: leaf.add } : {}),
-            });
           },
           throttleRefresh: () => throttleRef.current?.(),
           purgeRefresh: () =>
@@ -595,6 +629,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         client.dispose();
         clientRef.current = null;
         configuredRef.current = false;
+        configuredGateRef.current.reset();
       };
     }, [idField]);
 
@@ -676,6 +711,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       }
       const gen = ++configureGenRef.current;
       configuredRef.current = false;
+      configuredGateRef.current.reset();
       configureInFlightRef.current = true;
       try {
         await client.configure(feedConfigRef.current);
@@ -707,6 +743,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
 
         if (gen !== configureGenRef.current) return;
         configuredRef.current = true;
+        configuredGateRef.current.markReady();
         if (apiRef.current) {
           const api = apiRef.current;
           const prev =
@@ -1078,10 +1115,15 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         enableValue: true,
         enableRowGroup: true,
         enablePivot: true,
-        enableCellChangeFlash: true,
+        // Default off — high-frequency ticks make flash paint-heavy (AG SSRM).
+        enableCellChangeFlash: props.enableCellChangeFlash ?? false,
+        // Empty loading cells when full-width loading row is suppressed.
+        ...((props.showLoadingOverlay ?? false)
+          ? {}
+          : { loadingCellRenderer: () => "" }),
         ...props.defaultColDef,
       }),
-      [props.defaultColDef],
+      [props.defaultColDef, props.enableCellChangeFlash, props.showLoadingOverlay],
     );
 
     // The auto group column needs real width or the group key clips to just the
@@ -1146,9 +1188,16 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             ? { blockLoadDebounceMillis: props.blockLoadDebounceMillis }
             : {})}
           animateRows={false}
+          // Prefer empty cells over full-width "Loading…" rows while blocks fetch
+          // (AG Grid SSRM; restored via showLoadingOverlay).
+          suppressServerSideFullWidthLoadingRow={!(props.showLoadingOverlay ?? false)}
           rowHeight={props.rowHeight}
           headerHeight={props.headerHeight}
-          cellFlashDuration={500}
+          {...(props.enableCellChangeFlash
+            ? { cellFlashDuration: 500 }
+            : { cellFlashDuration: 0 })}
+          // Batch high-frequency leaf ticks into one DOM pass (AG Grid SSRM).
+          asyncTransactionWaitMillis={50}
           rowGroupPanelShow={treeData ? "never" : "always"}
           pivotPanelShow="always"
           sideBar={sideBar as never}

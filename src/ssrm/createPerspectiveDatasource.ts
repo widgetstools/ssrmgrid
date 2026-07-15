@@ -89,6 +89,11 @@ export type PerspectiveDatasourceExtras = {
   includeGrandTotal?: boolean;
   /** False until configure + initial setRowData finish. */
   isConfigured?: boolean;
+  /**
+   * Prefer over polling `isConfigured`: resolves when configure finishes
+   * (or false on timeout). Used by getRows cold-start wait.
+   */
+  waitUntilConfigured?: () => Promise<boolean>;
 };
 
 export function createPerspectiveDatasource(
@@ -192,13 +197,15 @@ export function createPerspectiveDatasource(
       }
 
       const run = async () => {
-        // Cold mounts fire getRows before configure+setRowData. Waiting avoids
-        // a permanent ERR cell from params.fail() on an empty/unindexed table.
-        for (let i = 0; i < 400; i++) {
-          if (getExtras?.().isConfigured) break;
-          await new Promise((r) => setTimeout(r, 25));
-        }
-        if (!getExtras?.().isConfigured) {
+        // Cold mounts fire getRows before configure+setRowData. Await the gate
+        // instead of a busy-wait poll so we do not stack timers.
+        const extrasLive = getExtras?.() ?? {};
+        const ready = extrasLive.isConfigured
+          ? true
+          : extrasLive.waitUntilConfigured
+            ? await extrasLive.waitUntilConfigured()
+            : false;
+        if (!ready && !getExtras?.().isConfigured) {
           params.fail();
           return;
         }

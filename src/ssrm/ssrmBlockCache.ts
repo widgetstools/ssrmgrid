@@ -55,6 +55,11 @@ export class SsrmBlockCache {
     this.blocks.set(key, value);
   }
 
+  /**
+   * Drop all blocks. Call on purge soft-refresh and when refreshGeneration
+   * bumps so sync hits cannot serve a pre-change query shape.
+   * Late in-flight loads from a prior epoch do not repopulate.
+   */
   clear(): void {
     this.epoch += 1;
     this.blocks.clear();
@@ -92,6 +97,19 @@ export class SsrmBlockCache {
       }
     }
     return patched;
+  }
+
+  /** First cached row matching `idField === id`, if any. */
+  findRow(
+    idField: string,
+    id: string,
+  ): Record<string, unknown> | undefined {
+    for (const block of this.blocks.values()) {
+      for (const row of block.rowData) {
+        if (String(row[idField]) === id) return row;
+      }
+    }
+    return undefined;
   }
 
   /**
