@@ -294,6 +294,9 @@ export type ValueAggPlan = {
 /** Perspective aggregates for value cols; trafficLight expands to min+max aliases. */
 export function buildValueAggPlan(
   valueCols: SsrmGetRowsRequest["valueCols"],
+  /** When a trafficLight field is a Perspective calc, inline its expression into aliases
+   *  (Perspective rejects aggregating via `"calcCol"` expression references). */
+  calcExpressions?: Record<string, string>,
 ): ValueAggPlan {
   const aggregates: Record<string, string> = {};
   const measureColumns: string[] = [];
@@ -306,8 +309,9 @@ export function buildValueAggPlan(
     if (isTrafficLightAgg(valueCol.aggFunc)) {
       const minAlias = aggregateAlias(field, "min");
       const maxAlias = aggregateAlias(field, "max");
-      expressions[minAlias] = `"${field}"`;
-      expressions[maxAlias] = `"${field}"`;
+      const sourceExpr = calcExpressions?.[field] ?? `"${field}"`;
+      expressions[minAlias] = sourceExpr;
+      expressions[maxAlias] = sourceExpr;
       aggregates[minAlias] = "min";
       aggregates[maxAlias] = "max";
       if (!measureColumns.includes(minAlias)) measureColumns.push(minAlias);
@@ -426,7 +430,10 @@ function mapPivotRequestToView(
   dataset?: DatasetId,
 ): MappedQuery {
   const splitBy = pivotCols.map((c) => c.field);
-  const valueAggPlan = buildValueAggPlan(valueCols);
+  const valueAggPlan = buildValueAggPlan(
+    valueCols,
+    dataset ? getCalculatedExpressions(dataset) : undefined,
+  );
   const valueFields = valueAggPlan.measureColumns;
   const valueAggregates = valueAggPlan.aggregates;
   const valueExpressions = valueAggPlan.expressions;
@@ -696,7 +703,10 @@ export function mapSsrmRequestToView(
     },
   );
 
-  const valueAggPlan = buildValueAggPlan(valueCols);
+  const valueAggPlan = buildValueAggPlan(
+    valueCols,
+    resolvedDataset ? getCalculatedExpressions(resolvedDataset) : undefined,
+  );
   const aggregates = {
     ...valueAggPlan.aggregates,
     [groupField]: "any",

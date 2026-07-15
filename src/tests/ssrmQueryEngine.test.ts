@@ -508,6 +508,19 @@ describe("buildValueAggPlan", () => {
       aggregateAlias("ragStatus", "min"),
       aggregateAlias("ragStatus", "max"),
     ]);
+    expect(plan.expressions[aggregateAlias("ragStatus", "min")]).toBe(
+      '"ragStatus"',
+    );
+  });
+
+  it("inlines calc expressions into trafficLight min/max aliases", () => {
+    const calc = 'if("price" >= 105, 1, if("price" >= 95, 2, 3))';
+    const plan = buildValueAggPlan(
+      [{ id: "trafficlight", field: "trafficlight", aggFunc: "trafficLight" }],
+      { trafficlight: calc },
+    );
+    expect(plan.expressions[aggregateAlias("trafficlight", "min")]).toBe(calc);
+    expect(plan.expressions[aggregateAlias("trafficlight", "max")]).toBe(calc);
   });
 });
 

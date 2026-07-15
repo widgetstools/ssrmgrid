@@ -679,12 +679,14 @@ export function createPerspectiveHost(
         if (isTrafficLightAgg(rawAgg)) {
           const minAlias = aggregateAlias(field, "min");
           const maxAlias = aggregateAlias(field, "max");
+          const calcs = getCalculatedExpressions(dataset);
+          const sourceExpr = calcs[field] ?? `"${field}"`;
           aliasBySpec.push(
             { field, aggFunc: "min", alias: minAlias },
             { field, aggFunc: "max", alias: maxAlias },
           );
-          exprMap[minAlias] = `"${field}"`;
-          exprMap[maxAlias] = `"${field}"`;
+          exprMap[minAlias] = sourceExpr;
+          exprMap[maxAlias] = sourceExpr;
           perspectiveAggregates[minAlias] = "min";
           perspectiveAggregates[maxAlias] = "max";
           if (!columns.includes(minAlias)) columns.push(minAlias);

@@ -58,6 +58,21 @@ export default function App() {
         aggFunc: "avg",
         valueFormatter: (p) => (typeof p.value === "number" ? p.value.toFixed(1) : ""),
       },
+      // Step A: leaf classify only (avg) — prove Perspective expr works.
+      {
+        field: "trafficlight",
+        headerName: "RAG",
+        cellDataType: "number",
+        perspectiveExpression: 'if("price" >= 105, 1, if("price" >= 95, 2, 3))',
+        aggFunc: "trafficLight",
+        width: 90,
+        valueFormatter: (p) => {
+          if (p.value === 1) return "🟢";
+          if (p.value === 2) return "🟡";
+          if (p.value === 3) return "🔴";
+          return typeof p.value === "number" ? String(p.value) : "";
+        },
+      },
     ],
     [],
   );
@@ -158,7 +173,16 @@ export default function App() {
           getRowId="id"
           onTotals={setTotals}
           quickFilterText={quickFilter}
+          quickFilterFields={[
+            "book",
+            "trader",
+            "region",
+            "currency",
+            "instrumentType",
+          ]}
           enableCharts
+          grandTotalRow="bottom"
+          groupTotalRow="bottom"
           masterDetail={{ detailColumnDefs, getDetailRowData }}
         />
       </div>
