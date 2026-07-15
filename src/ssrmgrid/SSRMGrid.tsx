@@ -37,9 +37,19 @@ import { refreshAllLoadedServerSideStores } from "../ssrm/refreshAllLoadedStores
 import type { FeedConfig } from "../ssrm/types";
 import { createWorkerClient } from "../ssrm/workerClient";
 import { PIVOT_FIELD_SEPARATOR } from "../workers/ssrmQueryEngine";
+import { foldTrafficLight } from "../ssrm/trafficLightAgg";
 import { buildColumnOverride, type SSRMColDef } from "./columnOverride";
 
 const DATASET = "main";
+
+/** Client stub so AG Grid Values panel keeps `trafficLight` (SSRM computes server-side). */
+function trafficLightAggFunc(params: { values: unknown[] }): number | null {
+  const nums = params.values
+    .map((v) => (typeof v === "number" ? v : Number(v)))
+    .filter((n): n is number => Number.isFinite(n));
+  if (nums.length === 0) return null;
+  return foldTrafficLight(Math.min(...nums), Math.max(...nums));
+}
 
 export type GrandTotalRowMode =
   | boolean
@@ -897,6 +907,13 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       [],
     );
     const cellSelection = useMemo(() => ({ handle: { mode: "fill" as const } }), []);
+    const aggFuncs = useMemo(
+      () => ({
+        trafficLight: trafficLightAggFunc,
+        rag: trafficLightAggFunc,
+      }),
+      [],
+    );
 
     void forceRerender;
 
@@ -928,6 +945,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           overlayNoRowsTemplate={props.overlayNoRowsTemplate ?? " "}
           rowSelection={rowSelection}
           cellSelection={cellSelection}
+          aggFuncs={aggFuncs}
           undoRedoCellEditing
           pagination={props.pagination}
           paginationPageSize={props.paginationPageSize ?? 100}
