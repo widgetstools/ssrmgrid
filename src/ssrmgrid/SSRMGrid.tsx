@@ -8,7 +8,6 @@ import {
   useState,
 } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { CustomStatusPanelProps } from "ag-grid-react";
 import type {
   CellValueChangedEvent,
   ChartType,
@@ -43,6 +42,7 @@ import { createWorkerClient } from "../ssrm/workerClient";
 import { PIVOT_FIELD_SEPARATOR } from "../workers/ssrmQueryEngine";
 import { foldTrafficLight } from "../ssrm/trafficLightAgg";
 import { buildColumnOverride, type SSRMColDef } from "./columnOverride";
+import { SSRM_DEFAULT_STATUS_BAR } from "./ssrmStatusBarPanels";
 
 const DATASET = "main";
 
@@ -86,62 +86,10 @@ function usesNativeGrandTotal(
 }
 
 /**
- * Total (filtered) leaf-row count for the SSRM status bar. AG Grid's built-in
- * agTotalRowCount / agFilteredRowCount / agTotalAndFilteredRowCount panels warn
- * and render nothing under the Server-Side Row Model, so — per AG Grid's own
- * custom-status-panel guidance — we render the server-side count that SSRMGrid
- * stashes in grid context (`filteredRowCount`) on every totals refresh.
+ * AG Grid's built-in total/filtered row-count panels are CSRM-only (they warn
+ * and render nothing under SSRM). Default status bar uses SSRM stand-ins that
+ * mirror the native `ag-status-name-value` markup — see ssrmStatusBarPanels.
  */
-function ServerRowCountStatusPanel({ api }: CustomStatusPanelProps) {
-  const [counts, setCounts] = useState<{
-    total: number | null;
-    filtered: number | null;
-  }>({ total: null, filtered: null });
-  useEffect(() => {
-    const read = () => {
-      const ctx = api.getGridOption("context") as
-        | { totalRowCount?: number; filteredRowCount?: number }
-        | undefined;
-      setCounts({
-        total: typeof ctx?.totalRowCount === "number" ? ctx.totalRowCount : null,
-        filtered:
-          typeof ctx?.filteredRowCount === "number"
-            ? ctx.filteredRowCount
-            : null,
-      });
-    };
-    read();
-    api.addEventListener("modelUpdated", read);
-    return () => api.removeEventListener("modelUpdated", read);
-  }, [api]);
-
-  const { total, filtered } = counts;
-  const isFiltered =
-    total != null && filtered != null && filtered !== total;
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 4,
-        padding: "0 12px",
-        lineHeight: "1.5",
-        whiteSpace: "nowrap",
-      }}
-    >
-      <span style={{ opacity: 0.7 }}>Rows:</span>
-      {total == null ? (
-        <strong>…</strong>
-      ) : isFiltered ? (
-        <strong>
-          {filtered!.toLocaleString()} of {total.toLocaleString()}
-        </strong>
-      ) : (
-        <strong>{total.toLocaleString()}</strong>
-      )}
-    </span>
-  );
-}
 
 /** ag-grid-style transaction (add/update by object, remove by object or id). */
 export interface SSRMTransaction {
@@ -505,11 +453,20 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           (totals, filteredRowCount, aggregates) => {
             const api = apiRef.current;
             if (api) {
+              const prev = (api.getGridOption("context") as
+                | Record<string, unknown>
+                | undefined) ?? {};
               api.setGridOption("context", {
-                ...(api.getGridOption("context") as object | undefined),
+                ...prev,
                 totals,
                 aggregates,
                 filteredRowCount,
+                // Keep cached unfiltered total when getRows only reports filtered.
+                totalRowCount:
+                  totalRowCountRef.current ??
+                  (typeof prev.totalRowCount === "number"
+                    ? prev.totalRowCount
+                    : filteredRowCount),
               });
             }
             onTotalsPropRef.current?.(
@@ -908,17 +865,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     );
     const statusBar = useMemo(() => {
       if (props.statusBar !== undefined) return props.statusBar;
-      return {
-        // The built-in total/filtered row-count panels are client-side-row-model
-        // only (they warn + render nothing under SSRM), so the leaf count comes
-        // from a custom panel fed by the server-side count. Selected-count and
-        // range aggregation are native and sit on the right.
-        statusPanels: [
-          { statusPanel: ServerRowCountStatusPanel, align: "left" as const },
-          { statusPanel: "agSelectedRowCountComponent", align: "right" as const },
-          { statusPanel: "agAggregationComponent", align: "right" as const },
-        ],
-      };
+      return SSRM_DEFAULT_STATUS_BAR;
     }, [props.statusBar]);
     const rowSelection = useMemo(
       () => ({
