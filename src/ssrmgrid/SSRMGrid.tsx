@@ -164,8 +164,9 @@ export interface SSRMGridProps {
    */
   blockLoadDebounceMillis?: number;
   /**
-   * Max cached SSRM blocks (default 40). Higher keeps more off-screen rows
-   * warm when scrolling back.
+   * Max cached SSRM blocks. Default **unlimited** (omit) — data already lives
+   * in the local Perspective worker; capping the grid cache forces re-fetch
+   * and blank Loading rows when scrolling back (unlike CSRM).
    */
   maxBlocksInCache?: number;
   /** Passthrough default column def. */
@@ -1110,8 +1111,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           rowModelType="serverSide"
           serverSideDatasource={datasource}
           cacheBlockSize={props.cacheBlockSize ?? 200}
-          maxBlocksInCache={props.maxBlocksInCache ?? 40}
-          maxConcurrentDatasourceRequests={3}
+          {...(props.maxBlocksInCache != null
+            ? { maxBlocksInCache: props.maxBlocksInCache }
+            : {})}
+          maxConcurrentDatasourceRequests={4}
           rowBuffer={20}
           {...(props.blockLoadDebounceMillis != null
             ? { blockLoadDebounceMillis: props.blockLoadDebounceMillis }
