@@ -6,6 +6,7 @@ import {
   type CachedGetRows,
   type SsrmBlockCache,
 } from "./ssrmBlockCache";
+import type { RowMirror } from "./rowMirror";
 import type { DatasetId, SsrmGetRowsResult } from "./types";
 import type { createWorkerClient } from "./workerClient";
 
@@ -94,6 +95,10 @@ export type PerspectiveDatasourceExtras = {
    * (or false on timeout). Used by getRows cold-start wait.
    */
   waitUntilConfigured?: () => Promise<boolean>;
+  /**
+   * Main-thread leaf book for sync flat/leaf getRows (Perspective-like scroll).
+   */
+  rowMirror?: RowMirror | null;
 };
 
 export function createPerspectiveDatasource(
@@ -187,7 +192,34 @@ export function createPerspectiveDatasource(
         });
       };
 
-      // Sync path: main-thread cache hit → no Loading flash.
+      // Sync path: main-thread leaf mirror → no blank placeholder rows on fling.
+      if (extras.isConfigured && extras.rowMirror?.isReady) {
+        const mirrored = extras.rowMirror.tryGetRows({
+          startRow,
+          endRow,
+          rowGroupCols: keyParts.rowGroupCols,
+          groupKeys: keyParts.groupKeys,
+          pivotMode: keyParts.pivotMode,
+          filterModel: keyParts.filterModel,
+          sortModel: keyParts.sortModel,
+          quickFilterText: extras.quickFilterText,
+          quickFilterFields: extras.quickFilterFields,
+          treeData: extras.treeData,
+          absSort: extras.absSort,
+          rowKeepExpression: extras.rowKeepExpression,
+        });
+        if (mirrored) {
+          const cached: CachedGetRows = {
+            rowData: mirrored.rowData,
+            rowCount: mirrored.rowCount,
+          };
+          if (blockCache) blockCache.set(cacheKey, cached);
+          deliver(cached);
+          return;
+        }
+      }
+
+      // Sync path: block cache hit → no Loading flash.
       if (blockCache && extras.isConfigured) {
         const hit = blockCache.get(cacheKey);
         if (hit) {

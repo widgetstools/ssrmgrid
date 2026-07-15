@@ -135,34 +135,6 @@ export default function App() {
 
   const colCount = columnDefs.length;
 
-  // Master/detail: synthetic "fills" per position (stands in for any detail
-  // fetch — REST, another Perspective table, etc.).
-  const detailColumnDefs = useMemo(
-    () => [
-      { field: "fillId", headerName: "Fill" },
-      { field: "time", headerName: "Time" },
-      { field: "qty", headerName: "Qty", cellDataType: "number" },
-      { field: "price", headerName: "Price", cellDataType: "number" },
-      { field: "venue" },
-    ],
-    [],
-  );
-  const getDetailRowData = useMemo(
-    () => (master: Record<string, unknown>) => {
-      const n = 3 + (String(master.id).charCodeAt(6) % 5);
-      const venues = ["XNYS", "XLON", "XTKS", "BATS"];
-      const rows = Array.from({ length: n }, (_, i) => ({
-        fillId: `${master.id}-F${i}`,
-        time: `10:${String(10 + i).padStart(2, "0")}:00`,
-        qty: Math.round(Number(master.quantity) / n),
-        price: Number(master.price) + (i - n / 2) * 0.02,
-        venue: venues[i % venues.length],
-      }));
-      return Promise.resolve(rows);
-    },
-    [],
-  );
-
   useEffect(() => {
     const stop = startTicking(rowsRef.current, rate, (updates) => {
       gridRef.current?.applyTransactionAsync({ update: updates });
@@ -246,7 +218,6 @@ export default function App() {
           enableCharts
           grandTotalRow="bottom"
           groupTotalRow="bottom"
-          masterDetail={{ detailColumnDefs, getDetailRowData }}
         />
       </div>
     </div>

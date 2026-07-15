@@ -39,6 +39,11 @@ import {
 import { refreshAllLoadedServerSideStores } from "../ssrm/refreshAllLoadedStores";
 import { ConfiguredGate } from "../ssrm/configuredGate";
 import { mergeLeafUpdateRows } from "../ssrm/mergeLeafUpdateRows";
+import { RowMirror } from "../ssrm/rowMirror";
+import {
+  MirrorLoadingCellRenderer,
+  setActiveRowMirror,
+} from "../ssrm/mirrorLoadingCell";
 import { SsrmBlockCache } from "../ssrm/ssrmBlockCache";
 import type { FeedConfig } from "../ssrm/types";
 import { createWorkerClient } from "../ssrm/workerClient";
@@ -156,14 +161,15 @@ export interface SSRMGridProps {
   /** Live-refresh throttle in ms (default 150). */
   refreshThrottleMs?: number;
   /**
-   * SSRM rows per fetched block (default 200). Larger = fewer getRows while
-   * scrolling; smaller = snappier first paint of each block.
+   * SSRM rows per fetched block (default 100). Keep modest — large blocks make
+   * AG Grid sync-materialize hundreds of row nodes after each thumb jump and
+   * feel like a multi-second hang even when RowMirror getRows is instant.
    */
   cacheBlockSize?: number;
   /**
-   * Optional delay before loading a block while scrolling. Default **off**
-   * (undefined) — debounce causes blank gaps during fast wheel/trackpad flings.
-   * Only set if you explicitly want skip-over-block behaviour.
+   * Debounce SSRM block loads while the thumb/wheel is moving (default 50ms).
+   * Intermediate positions are skipped; stubs paint from RowMirror so the
+   * viewport stays filled. Set `0` to load every block immediately.
    */
   blockLoadDebounceMillis?: number;
   /**
@@ -172,6 +178,18 @@ export interface SSRMGridProps {
    * and blank Loading rows when scrolling back (unlike CSRM).
    */
   maxBlocksInCache?: number;
+  /**
+   * Extra rows rendered above/below the viewport (default 20). Larger buffers
+   * force more SSRM blocks to materialize after each thumb jump.
+   */
+  rowBuffer?: number;
+  /**
+   * When true (default), draw scroll rows synchronously. Required for SSRM
+   * thumb jumps: with rAF deferral the viewport is empty until the next frame
+   * and stub cells can sit blank. Set false only if you need softer wheel
+   * animation and accept blank gaps on large thumb moves.
+   */
+  suppressAnimationFrame?: boolean;
   /**
    * Flash cells on value change. Default **false** — high-frequency ticks make
    * change-flash paint-heavy. Opt in for demos that need visual tick cues.
@@ -322,6 +340,13 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
      * Cleared on purge / soft-refresh fallback; leaf updates patchRows.
      */
     const blockCacheRef = useRef(new SsrmBlockCache());
+    /**
+     * Full leaf book on the main thread — flat/leaf getRows succeed sync
+     * (Perspective-viewer-like scroll; no blank placeholder rows on fling).
+     */
+    const rowMirrorRef = useRef(new RowMirror());
+    // Keep loaders pointed at the live book even if grid context is overwritten.
+    setActiveRowMirror(rowMirrorRef.current);
     /** Resolves getRows / filter-value waits without busy-polling. */
     const configuredGateRef = useRef(new ConfiguredGate());
     const gridReadyRef = useRef(false);
@@ -456,6 +481,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             : total;
           api.setGridOption("context", {
             ...(api.getGridOption("context") as object | undefined),
+            rowMirror: rowMirrorRef.current,
             totalRowCount: total,
             filteredRowCount: filtered,
           });
@@ -482,6 +508,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           });
           api.setGridOption("context", {
             ...(api.getGridOption("context") as object | undefined),
+            rowMirror: rowMirrorRef.current,
             totals: result.totals,
             aggregates: result.aggregates,
             filteredRowCount: result.rowCount,
@@ -542,6 +569,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             includeGrandTotal: usesNativeGrandTotal(grandTotalRowRef.current),
             isConfigured: configuredRef.current,
             waitUntilConfigured: () => configuredGateRef.current.wait(10_000),
+            rowMirror: rowMirrorRef.current,
           }),
           (totals, filteredRowCount, aggregates) => {
             const api = apiRef.current;
@@ -551,6 +579,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
                 | undefined) ?? {};
               api.setGridOption("context", {
                 ...prev,
+                rowMirror: rowMirrorRef.current,
                 totals,
                 aggregates,
                 filteredRowCount,
@@ -591,24 +620,30 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             // SSRM `update` replaces row.data — merge partial patches first or
             // Book/Trader/etc. blank out (ticks only send changed fields).
             if (leaf.update?.length) {
-              // Merge into main-thread cache first, then prefer those rows when
-              // building AG update payloads (SSRM replaces row.data wholesale).
+              // Always keep mirror + block cache current (stub paint / sync getRows).
+              const fromMirror = rowMirrorRef.current.patchById(leaf.update);
               blockCacheRef.current.patchRows(idField, leaf.update);
+              // While the user is scrolling, skip AG Grid txs — they fight the
+              // scroll pipeline and blank cells mid-drag.
+              if (Date.now() < tickQuietUntilRef.current) return;
               const update = mergeLeafUpdateRows(
                 idField,
                 leaf.update,
                 (id) =>
+                  rowMirrorRef.current.findById(id) ??
                   blockCacheRef.current.findRow(idField, id) ??
                   (api.getRowNode(id)?.data as
                     | Record<string, unknown>
                     | undefined),
               );
               api.applyServerSideTransactionAsync({
-                update,
+                update: update.length ? update : fromMirror,
                 ...(leaf.add?.length ? { add: leaf.add } : {}),
               });
             } else if (leaf.add?.length) {
+              rowMirrorRef.current.patchById(leaf.add);
               blockCacheRef.current.clear();
+              if (Date.now() < tickQuietUntilRef.current) return;
               api.applyServerSideTransactionAsync({ add: leaf.add });
             }
           },
@@ -630,6 +665,8 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         clientRef.current = null;
         configuredRef.current = false;
         configuredGateRef.current.reset();
+        rowMirrorRef.current.clear();
+        setActiveRowMirror(null);
       };
     }, [idField]);
 
@@ -709,9 +746,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       if (!sampleRowRef.current && !(rowDataRef.current?.length)) {
         return;
       }
-      const gen = ++configureGenRef.current;
+        const gen = ++configureGenRef.current;
       configuredRef.current = false;
       configuredGateRef.current.reset();
+      rowMirrorRef.current.clear();
       configureInFlightRef.current = true;
       try {
         await client.configure(feedConfigRef.current);
@@ -739,6 +777,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           } finally {
             if (gen === configureGenRef.current) ingestingRef.current = false;
           }
+          // Sync leaf mirror for fling scroll (full projected book).
+          rowMirrorRef.current.replaceAll(projected, idField);
+        } else {
+          rowMirrorRef.current.clear();
         }
 
         if (gen !== configureGenRef.current) return;
@@ -751,6 +793,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             {};
           api.setGridOption("context", {
             ...prev,
+            rowMirror: rowMirrorRef.current,
             ssrmConfigured: true,
             ssrmCountMatching: countMatching,
           });
@@ -779,7 +822,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       } finally {
         if (gen === configureGenRef.current) configureInFlightRef.current = false;
       }
-    }, [purgeRefreshStores, countMatching]);
+    }, [purgeRefreshStores, countMatching, idField]);
 
     // Re-configure when the schema/config changes (including first sample).
     useEffect(() => {
@@ -808,6 +851,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         appliedQuickFilterRef.current = quick;
         appliedAbsSortRef.current = abs;
         appliedRowKeepRef.current = keep;
+        rowMirrorRef.current.invalidateView();
         purgeRefreshStoresRef.current({
           refetchTotal: false,
           quietTicksMs: 400,
@@ -832,9 +876,11 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         feedConfigRef.current.index,
       );
       const projected = projectRowsForSchema(rows, keys);
+      // Keep main-thread mirror aligned with host snapshots.
+      rowMirrorRef.current.replaceAll(projected, idField);
       // Worker emits `dirty` → purge refresh; no local .then refresh.
       void client.setRowData(DATASET, projected);
-    }, [rowData]);
+    }, [rowData, idField]);
 
     // Normalize a transaction's `remove` to id list (id field or object).
     const removeIds = useCallback(
@@ -851,12 +897,17 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       (tx: SSRMTransaction) => {
         const client = clientRef.current;
         if (!client) return;
+        // Keep sync leaf mirror aligned before/with worker mutate.
+        if (tx.update?.length) rowMirrorRef.current.patchById(tx.update);
+        if (tx.add?.length) rowMirrorRef.current.patchById(tx.add);
+        const removed = removeIds(tx.remove);
+        if (removed.length) rowMirrorRef.current.removeByIds(removed);
         // UI refresh + totals come from the worker `dirty` event after mutate.
         void client.applyTransaction({
           dataset: DATASET,
           add: tx.add,
           update: tx.update,
-          remove: removeIds(tx.remove),
+          remove: removed,
         });
       },
       [removeIds],
@@ -1094,10 +1145,12 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       purgeRefreshStores();
     }, [purgeRefreshStores]);
 
+    const hostRef = useRef<HTMLDivElement | null>(null);
+
     // Soft-refresh from live ticks fights the scroll pipeline — quiet it while
-    // the user is flinging (wheel / trackpad / thumb).
+    // the user is flinging (wheel / trackpad / thumb). Also pauses AG Grid
+    // leaf txs (mirror still patches) so cells don't blank mid-drag.
     const onBodyScroll = useCallback(() => {
-      // Suppress tick soft-refresh fallback while the user is flinging.
       tickQuietUntilRef.current = Date.now() + 800;
     }, []);
 
@@ -1118,9 +1171,11 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         // Default off — high-frequency ticks make flash paint-heavy (AG SSRM).
         enableCellChangeFlash: props.enableCellChangeFlash ?? false,
         // Empty loading cells when full-width loading row is suppressed.
+        // Prefer mirror-backed stubs: AG Grid SSRM always defers getRows via
+        // setTimeout, so sync success alone still paints one blank frame.
         ...((props.showLoadingOverlay ?? false)
           ? {}
-          : { loadingCellRenderer: () => "" }),
+          : { loadingCellRenderer: MirrorLoadingCellRenderer }),
         ...props.defaultColDef,
       }),
       [props.defaultColDef, props.enableCellChangeFlash, props.showLoadingOverlay],
@@ -1169,7 +1224,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       props.loadThemeGoogleFonts ?? props.theme == null;
 
     return (
-      <div style={{ height: props.height ?? "100%", width: "100%" }}>
+      <div ref={hostRef} style={{ height: props.height ?? "100%", width: "100%" }}>
         <AgGridReact
           theme={resolvedTheme}
           loadThemeGoogleFonts={loadGoogleFonts}
@@ -1178,15 +1233,15 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           autoGroupColumnDef={autoGroupColumnDef}
           rowModelType="serverSide"
           serverSideDatasource={datasource}
-          cacheBlockSize={props.cacheBlockSize ?? 200}
+          cacheBlockSize={props.cacheBlockSize ?? 50}
           {...(props.maxBlocksInCache != null
             ? { maxBlocksInCache: props.maxBlocksInCache }
             : {})}
-          maxConcurrentDatasourceRequests={4}
-          rowBuffer={20}
-          {...(props.blockLoadDebounceMillis != null
-            ? { blockLoadDebounceMillis: props.blockLoadDebounceMillis }
-            : {})}
+          maxConcurrentDatasourceRequests={8}
+          rowBuffer={props.rowBuffer ?? 20}
+          debounceVerticalScrollbar={false}
+          blockLoadDebounceMillis={props.blockLoadDebounceMillis ?? 25}
+          suppressAnimationFrame={props.suppressAnimationFrame ?? true}
           animateRows={false}
           // Prefer empty cells over full-width "Loading…" rows while blocks fetch
           // (AG Grid SSRM; restored via showLoadingOverlay).
@@ -1233,7 +1288,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           onColumnRowGroupChanged={onStructureChanged}
           onColumnPivotChanged={onStructureChanged}
           onColumnPivotModeChanged={onStructureChanged}
-          onFilterChanged={() => void refreshTotals({ refetchTotal: false })}
+          onFilterChanged={() => {
+            rowMirrorRef.current.invalidateView();
+            void refreshTotals({ refetchTotal: false });
+          }}
           onCellValueChanged={onCellValueChanged}
           onFirstDataRendered={() => void refreshTotals()}
           onGridReady={(e) => {
@@ -1241,6 +1299,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             gridReadyRef.current = true;
             e.api.setGridOption("context", {
               ...(e.api.getGridOption("context") as object | undefined),
+              rowMirror: rowMirrorRef.current,
               ssrmCountMatching: countMatching,
               ssrmConfigured: configuredRef.current,
             });

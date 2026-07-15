@@ -717,3 +717,40 @@ export function applyPostPredicate(
   if (!postPredicate) return rows;
   return rows.filter(postPredicate);
 }
+
+/** Evaluate a Perspective filter tuple against a row (main-thread mirror). */
+export function rowMatchesPerspectiveFilter(
+  filter: PerspectiveFilter,
+  row: Record<string, unknown>,
+): boolean {
+  return evalPerspectiveFilter(filter, row);
+}
+
+/**
+ * True when the plan can be evaluated fully on the main thread (no Perspective
+ * expression columns required).
+ */
+export function filterPlanIsMainThreadSafe(plan: FilterPlan): boolean {
+  if (plan.expressions && Object.keys(plan.expressions).length > 0) {
+    return false;
+  }
+  return true;
+}
+
+/** AND all plan filters + optional postPredicate. */
+export function rowMatchesFilterPlan(
+  plan: FilterPlan,
+  row: Record<string, unknown>,
+): boolean {
+  const filters = plan.filters ?? [];
+  const op = plan.filterOp ?? "and";
+  if (filters.length > 0) {
+    const ok =
+      op === "or"
+        ? filters.some((f) => evalPerspectiveFilter(f, row))
+        : filters.every((f) => evalPerspectiveFilter(f, row));
+    if (!ok) return false;
+  }
+  if (plan.postPredicate && !plan.postPredicate(row)) return false;
+  return true;
+}
