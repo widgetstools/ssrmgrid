@@ -55,10 +55,17 @@ export interface SsrmGetRowsRequest {
   sortModel: SsrmSortEntry[];
   /** Server-side quick filter (OR contains across text columns). */
   quickFilterText?: string;
+  /** Restrict quick filter to these string fields (default: all non-PK strings). */
+  quickFilterFields?: string[];
   /** Treat groupKeys as a tree path over hierarchy fields. */
   treeData?: boolean;
   /** Absolute-value sort for numeric measure columns. */
   absSort?: boolean;
+  /**
+   * Perspective boolean expression: rows where truthy are kept (AND with
+   * other filters). Used for SSRM row-exclusion keep predicates.
+   */
+  rowKeepExpression?: string;
 }
 
 export interface SsrmGetRowsResult {
@@ -86,6 +93,10 @@ export interface AggregateRequest {
   valueCols: { id: string; field: string; aggFunc: string }[];
   filterModel: Record<string, unknown>;
   quickFilterText?: string;
+  /** Restrict quick filter to these string fields (default: all non-PK strings). */
+  quickFilterFields?: string[];
+  /** Perspective keep predicate (see SsrmGetRowsRequest.rowKeepExpression). */
+  rowKeepExpression?: string;
 }
 
 export interface AggregateResult {
@@ -100,9 +111,15 @@ export interface QueryAllRequest {
   dataset: DatasetId;
   filterModel: Record<string, unknown>;
   sortModel: SsrmSortEntry[];
-  /** Cap rows returned for safety (default 50_000). */
-  limit?: number;
+  /**
+   * Cap rows returned (default 50_000). Pass `null` for uncapped fetch
+   * (Phase 4a group leaf expansion — product decision: no safety cap).
+   */
+  limit?: number | null;
   quickFilterText?: string;
+  quickFilterFields?: string[];
+  /** Perspective keep predicate (see SsrmGetRowsRequest.rowKeepExpression). */
+  rowKeepExpression?: string;
   /** When true (default false), include current group/pivot structure. */
   includeStructure?: boolean;
   rowGroupCols?: SsrmGetRowsRequest["rowGroupCols"];
@@ -127,6 +144,10 @@ export interface SeriesDataRequest {
   valueCols: { id: string; field: string; aggFunc: string }[];
   filterModel: Record<string, unknown>;
   quickFilterText?: string;
+  /** Restrict quick filter to these string fields (default: all non-PK strings). */
+  quickFilterFields?: string[];
+  /** Perspective keep predicate (see SsrmGetRowsRequest.rowKeepExpression). */
+  rowKeepExpression?: string;
   limit?: number;
 }
 

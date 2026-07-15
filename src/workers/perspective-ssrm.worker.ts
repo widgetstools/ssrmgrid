@@ -1,5 +1,10 @@
 import "./perspectiveWorkerPolyfill";
-import type { WorkerInbound, WorkerOutbound } from "../ssrm/types";
+import type {
+  DatasetId,
+  TransactionRequest,
+  WorkerInbound,
+  WorkerOutbound,
+} from "../ssrm/types";
 import { registerDataset } from "../data/schemas";
 import { createPerspectiveHost, type PerspectiveHost } from "./perspectiveHost";
 
@@ -10,6 +15,34 @@ let opChain: Promise<void> = Promise.resolve();
 
 function emit(msg: WorkerOutbound): void {
   self.postMessage(msg);
+}
+
+/** Notify the UI that Perspective data changed (refresh / surgical SSRM update). */
+function emitDirty(
+  dataset: DatasetId,
+  leaf?: { update?: Record<string, unknown>[]; add?: Record<string, unknown>[] },
+): void {
+  const update = leaf?.update?.length ? leaf.update : undefined;
+  const add = leaf?.add?.length ? leaf.add : undefined;
+  if (update || add) {
+    emit({
+      type: "dirty",
+      at: Date.now(),
+      transaction: { dataset, ...(update ? { update } : {}), ...(add ? { add } : {}) },
+    });
+    return;
+  }
+  emit({ type: "dirty", at: Date.now() });
+}
+
+function emitDirtyFromTransaction(req: TransactionRequest): void {
+  const hasRemove = (req.remove?.length ?? 0) > 0;
+  if (hasRemove) {
+    // Removes need a purge refresh; omit leaf payload.
+    emitDirty(req.dataset);
+    return;
+  }
+  emitDirty(req.dataset, { update: req.update, add: req.add });
 }
 
 function enqueueOp<T>(fn: () => Promise<T>): Promise<T> {
@@ -104,6 +137,7 @@ self.onmessage = async (ev: MessageEvent<WorkerInbound>) => {
             rowCount,
           };
           self.postMessage(reply);
+          emitDirty(msg.dataset);
         });
         break;
       }
@@ -145,6 +179,7 @@ self.onmessage = async (ev: MessageEvent<WorkerInbound>) => {
             ok: true,
           };
           self.postMessage(reply);
+          emitDirty(msg.dataset, { update: msg.rows });
         });
         break;
       }
@@ -158,6 +193,7 @@ self.onmessage = async (ev: MessageEvent<WorkerInbound>) => {
             ok: true,
           };
           self.postMessage(reply);
+          emitDirty(msg.dataset);
         });
         break;
       }
@@ -171,6 +207,7 @@ self.onmessage = async (ev: MessageEvent<WorkerInbound>) => {
             ok: true,
           };
           self.postMessage(reply);
+          emitDirtyFromTransaction(msg.request);
         });
         break;
       }

@@ -23,9 +23,14 @@ import {
   mapFilterModel,
   mergeFilterPlans,
   quickFilterToPlan,
+  rowKeepExpressionToPlan,
   type PerspectiveFilter,
 } from "./ssrmFilters";
 import { aggregateAlias, collectAggregateSpecs } from "./sumTotals";
+import {
+  foldTrafficLight,
+  isTrafficLightAgg,
+} from "../ssrm/trafficLightAgg";
 import {
   applyClientSort,
   applyPostPredicate,
@@ -33,7 +38,7 @@ import {
   dropPerspectiveTotalsRow,
   getCountAggField,
   getLeafColumns,
-  getStringColumns,
+  getQuickFilterColumns,
   mapAggFunc,
   mapSsrmRequestToView,
   shapeGroupRows,
@@ -45,6 +50,23 @@ import {
 
 /** Synthetic group_by so Perspective emits a grand-total `__ROW_PATH__` row. */
 const AGG_ROOT_EXPR = "__ssrm_agg_root";
+
+const AGG_CACHE_MAX = 8;
+
+function aggregateCacheKey(request: AggregateRequest): string {
+  const specs = request.valueCols
+    .map((c) => `${c.field}:${c.aggFunc || "sum"}`)
+    .sort()
+    .join(",");
+  return JSON.stringify({
+    d: request.dataset,
+    f: request.filterModel ?? {},
+    q: request.quickFilterText ?? "",
+    qf: request.quickFilterFields ?? [],
+    k: request.rowKeepExpression ?? "",
+    s: specs,
+  });
+}
 
 export interface PerspectiveHost {
   ready: Promise<void>;
@@ -138,7 +160,13 @@ function aggregateFilteredRows(
       .filter((n): n is number => n != null);
 
     let value: unknown;
-    switch (rawAgg === "weightedAvg" ? "weightedAvg" : agg) {
+    switch (
+      rawAgg === "weightedAvg"
+        ? "weightedAvg"
+        : isTrafficLightAgg(rawAgg)
+          ? "trafficLight"
+          : agg
+    ) {
       case "sum":
         value = nums.reduce((acc, n) => acc + n, 0);
         break;
@@ -170,6 +198,14 @@ function aggregateFilteredRows(
       case "max":
         value = nums.length === 0 ? null : Math.max(...nums);
         break;
+      case "trafficLight":
+      case "rag": {
+        value =
+          nums.length === 0
+            ? null
+            : foldTrafficLight(Math.min(...nums), Math.max(...nums));
+        break;
+      }
       case "first":
         value = rows[0]?.[field] ?? null;
         break;
@@ -231,6 +267,20 @@ export function createPerspectiveHost(
   let activeDataset: DatasetId = options.dataset ?? "main";
   let client: Client | null = options.client ?? null;
   const tables = new Map<DatasetId, Table>();
+  /** Short-lived filtered-aggregate results shared across SSRM blocks in one refresh. */
+  const aggregateCache = new Map<string, AggregateResult>();
+
+  const invalidateAggregateCache = (): void => {
+    aggregateCache.clear();
+  };
+
+  const rememberAggregate = (key: string, result: AggregateResult): void => {
+    if (aggregateCache.size >= AGG_CACHE_MAX) {
+      const oldest = aggregateCache.keys().next().value;
+      if (oldest !== undefined) aggregateCache.delete(oldest);
+    }
+    aggregateCache.set(key, result);
+  };
 
   const ready = (async () => {
     if (!client) {
@@ -265,6 +315,7 @@ export function createPerspectiveHost(
       dataset: DatasetId,
       rows: Record<string, unknown>[],
     ): Promise<number> {
+      invalidateAggregateCache();
       const c = await ensureClient();
       activeDataset = dataset;
 
@@ -296,6 +347,7 @@ export function createPerspectiveHost(
       dataset: DatasetId,
       rows: Record<string, unknown>[],
     ): Promise<void> {
+      invalidateAggregateCache();
       activeDataset = dataset;
       const table = await ensureTable(dataset);
       await table.update(rows);
@@ -306,12 +358,14 @@ export function createPerspectiveHost(
       ids: (string | number)[],
     ): Promise<void> {
       if (ids.length === 0) return;
+      invalidateAggregateCache();
       activeDataset = dataset;
       const table = await ensureTable(dataset);
       await table.remove(ids);
     },
 
     async applyTransaction(request: TransactionRequest): Promise<void> {
+      invalidateAggregateCache();
       const { dataset, add, update, remove } = request;
       activeDataset = dataset;
       const table = await ensureTable(dataset);
@@ -342,6 +396,7 @@ export function createPerspectiveHost(
             dataset,
             filterModel: request.filterModel,
             quickFilterText: request.quickFilterText,
+            quickFilterFields: request.quickFilterFields,
             valueCols: specs.map((s) => ({
               id: `${s.field}:${s.aggFunc}`,
               field: s.field,
@@ -551,6 +606,10 @@ export function createPerspectiveHost(
     },
 
     async getAggregates(request: AggregateRequest): Promise<AggregateResult> {
+      const cacheKey = aggregateCacheKey(request);
+      const cached = aggregateCache.get(cacheKey);
+      if (cached) return cached;
+
       const dataset = request.dataset;
       const table = await ensureTable(dataset);
       const countField = getCountAggField(dataset);
@@ -560,7 +619,11 @@ export function createPerspectiveHost(
       const plan = mergeFilterPlans(
         [
           mapFilterModel(request.filterModel),
-          quickFilterToPlan(request.quickFilterText, getStringColumns(dataset)),
+          quickFilterToPlan(
+            request.quickFilterText,
+            getQuickFilterColumns(dataset, request.quickFilterFields),
+          ),
+          rowKeepExpressionToPlan(request.rowKeepExpression),
         ],
         "and",
       );
@@ -583,7 +646,9 @@ export function createPerspectiveHost(
             (await view.to_json()) as Record<string, unknown>[],
           );
           rows = applyPostPredicate(rows, plan.postPredicate);
-          return aggregateFilteredRows(rows, valueCols);
+          const result = aggregateFilteredRows(rows, valueCols);
+          rememberAggregate(cacheKey, result);
+          return result;
         } finally {
           await view.delete();
         }
@@ -610,14 +675,36 @@ export function createPerspectiveHost(
       }> = [];
 
       for (const valueCol of valueCols) {
-        const aggFunc = valueCol.aggFunc || "sum";
-        const alias = aggregateAlias(valueCol.field, aggFunc);
+        const field = valueCol.field;
+        if (!field) continue;
+        const rawAgg = valueCol.aggFunc || "sum";
+
+        if (isTrafficLightAgg(rawAgg)) {
+          const minAlias = aggregateAlias(field, "min");
+          const maxAlias = aggregateAlias(field, "max");
+          const calcs = getCalculatedExpressions(dataset);
+          const sourceExpr = calcs[field] ?? `"${field}"`;
+          aliasBySpec.push(
+            { field, aggFunc: "min", alias: minAlias },
+            { field, aggFunc: "max", alias: maxAlias },
+          );
+          exprMap[minAlias] = sourceExpr;
+          exprMap[maxAlias] = sourceExpr;
+          perspectiveAggregates[minAlias] = "min";
+          perspectiveAggregates[maxAlias] = "max";
+          if (!columns.includes(minAlias)) columns.push(minAlias);
+          if (!columns.includes(maxAlias)) columns.push(maxAlias);
+          continue;
+        }
+
+        const aggFunc = rawAgg;
+        const alias = aggregateAlias(field, aggFunc);
         aliasBySpec.push({
-          field: valueCol.field,
+          field,
           aggFunc,
           alias,
         });
-        exprMap[alias] = `"${valueCol.field}"`;
+        exprMap[alias] = `"${field}"`;
         perspectiveAggregates[alias] = mapAggFunc(aggFunc);
         if (!columns.includes(alias)) columns.push(alias);
       }
@@ -641,25 +728,40 @@ export function createPerspectiveHost(
           aggregates[field][aggFunc] = value;
           if (aggFunc === "sum") totals[field] = value;
         }
-        return {
+        for (const valueCol of valueCols) {
+          const field = valueCol.field;
+          const rawAgg = valueCol.aggFunc || "sum";
+          if (!field || !isTrafficLightAgg(rawAgg)) continue;
+          if (!aggregates[field]) aggregates[field] = {};
+          aggregates[field][rawAgg] = foldTrafficLight(
+            aggregates[field]["min"],
+            aggregates[field]["max"],
+          );
+        }
+        const result: AggregateResult = {
           totals,
           aggregates,
           rowCount: Number(totalsRow?.[countField]) || 0,
         };
+        rememberAggregate(cacheKey, result);
+        return result;
       } finally {
         await view.delete();
       }
     },
 
     async queryAll(request: QueryAllRequest): Promise<QueryAllResult> {
-      const limit = request.limit ?? 50_000;
+      const uncapped = request.limit === null;
+      const limit = uncapped ? undefined : (request.limit ?? 50_000);
       const countField = getCountAggField(request.dataset);
       const includeStructure = Boolean(request.includeStructure);
+      const table = await ensureTable(request.dataset);
+      const endRow = uncapped ? Number(await table.size()) : (limit as number);
       const mapped = mapSsrmRequestToView(
         {
           dataset: request.dataset,
           startRow: 0,
-          endRow: limit,
+          endRow,
           rowGroupCols: includeStructure ? (request.rowGroupCols ?? []) : [],
           valueCols: includeStructure ? (request.valueCols ?? []) : [],
           pivotCols: includeStructure ? (request.pivotCols ?? []) : [],
@@ -668,14 +770,13 @@ export function createPerspectiveHost(
           filterModel: request.filterModel,
           sortModel: request.sortModel,
           quickFilterText: request.quickFilterText,
+          quickFilterFields: request.quickFilterFields,
           treeData: includeStructure ? request.treeData : false,
           absSort: request.absSort,
         },
         countField,
         request.dataset,
       );
-
-      const table = await ensureTable(request.dataset);
       const view = await table.view(mapped.viewConfig);
       let structureView: Awaited<ReturnType<Table["view"]>> | null = null;
       try {
@@ -744,7 +845,7 @@ export function createPerspectiveHost(
         rowData = applyClientSort(rowData, mapped.clientSort);
         const rowCount = rowData.length;
         return {
-          rowData: rowData.slice(0, limit),
+          rowData: limit == null ? rowData : rowData.slice(0, limit),
           rowCount,
           ...(pivotResultFields ? { pivotResultFields } : {}),
         };
@@ -766,7 +867,11 @@ export function createPerspectiveHost(
       const plan = mergeFilterPlans(
         [
           mapFilterModel(request.filterModel),
-          quickFilterToPlan(request.quickFilterText, getStringColumns(dataset)),
+          quickFilterToPlan(
+            request.quickFilterText,
+            getQuickFilterColumns(dataset, request.quickFilterFields),
+          ),
+          rowKeepExpressionToPlan(request.rowKeepExpression),
         ],
         "and",
       );
@@ -783,7 +888,12 @@ export function createPerspectiveHost(
         }
       }
 
-      if (plan.postPredicate || valueCols.some((c) => c.aggFunc === "weightedAvg")) {
+      if (
+        plan.postPredicate ||
+        valueCols.some(
+          (c) => c.aggFunc === "weightedAvg" || isTrafficLightAgg(c.aggFunc),
+        )
+      ) {
         const leafColumns = getLeafColumns(dataset);
         const view = await table.view({
           columns: leafColumns,
@@ -909,6 +1019,7 @@ export function createPerspectiveHost(
     },
 
     async clear(): Promise<void> {
+      invalidateAggregateCache();
       await ensureClient();
       for (const table of tables.values()) {
         await table.delete();

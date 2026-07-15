@@ -4,6 +4,7 @@ import {
   applyPostPredicate,
   mapFilterModel,
   quickFilterToPlan,
+  rowKeepExpressionToPlan,
   simpleConditionToFilters,
 } from "../workers/ssrmFilters";
 
@@ -183,14 +184,30 @@ describe("mapFilterModel", () => {
 });
 
 describe("quickFilterToPlan", () => {
-  it("builds an OR contains expression across text columns", () => {
+  it("builds an OR of case-insensitive contains across text columns", () => {
     const plan = quickFilterToPlan("usd", ["desk", "currency", "ticker"]);
     expect(plan.filters).toEqual([["__ssrm_quick_filter", "==", true]]);
-    expect(plan.expressions?.__ssrm_quick_filter).toContain("desk");
-    expect(plan.expressions?.__ssrm_quick_filter).toContain("currency");
+    const expr = plan.expressions?.__ssrm_quick_filter ?? "";
+    expect(expr).toContain('match(lower(string("desk"))');
+    expect(expr).toContain('match(lower(string("currency"))');
+    expect(expr).toContain(" or ");
   });
 
   it("returns empty plan for blank quick filter", () => {
     expect(quickFilterToPlan("  ", ["desk"])).toEqual({});
+  });
+});
+
+describe("rowKeepExpressionToPlan", () => {
+  it("wraps a Perspective keep expression as a boolean column filter", () => {
+    const plan = rowKeepExpressionToPlan('not("ccy" == \'INR\')');
+    expect(plan.filters).toEqual([["__ssrm_row_keep", "==", true]]);
+    expect(plan.expressions?.__ssrm_row_keep).toBe('not("ccy" == \'INR\')');
+    expect(plan.filterOp).toBe("and");
+  });
+
+  it("returns empty plan for blank keep expression", () => {
+    expect(rowKeepExpressionToPlan("  ")).toEqual({});
+    expect(rowKeepExpressionToPlan(undefined)).toEqual({});
   });
 });

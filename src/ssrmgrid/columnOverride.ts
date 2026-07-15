@@ -1,4 +1,4 @@
-import type { ColDef } from "ag-grid-community";
+import type { ColDef, ColGroupDef } from "ag-grid-community";
 import type { PerspectiveColumnType } from "../ssrm/types";
 
 /**
@@ -14,6 +14,8 @@ export interface SSRMColDef extends ColDef {
   perspectiveExpression?: string;
   /** Explicit Perspective column type (else derived from cellDataType / sample). */
   perspectiveType?: PerspectiveColumnType;
+  /** Column-group children — walked for Perspective schema extraction. */
+  children?: SSRMColDef[];
 }
 
 export interface ColumnOverrideResult {
@@ -42,11 +44,15 @@ function typeFromCellDataType(cdt: unknown): PerspectiveColumnType | undefined {
   }
 }
 
-function typeFromSample(value: unknown): PerspectiveColumnType {
+function typeFromSample(value: unknown): PerspectiveColumnType | undefined {
+  if (value === null || value === undefined) return undefined;
+  // Perspective scalars only — skip arrays/objects (sparklines, nested payloads).
+  if (typeof value === "object" && !(value instanceof Date)) return undefined;
   if (typeof value === "number") return Number.isInteger(value) ? "integer" : "float";
   if (typeof value === "boolean") return "boolean";
   if (value instanceof Date) return "datetime";
-  return "string";
+  if (typeof value === "string") return "string";
+  return undefined;
 }
 
 function resolveType(
@@ -56,13 +62,24 @@ function resolveType(
   return (
     def.perspectiveType ??
     typeFromCellDataType(def.cellDataType) ??
-    (sample === undefined || sample === null ? "string" : typeFromSample(sample))
+    typeFromSample(sample) ??
+    "string"
   );
+}
+
+function isColGroup(
+  def: SSRMColDef,
+): def is SSRMColDef & ColGroupDef & { children: SSRMColDef[] } {
+  return Array.isArray(def.children) && def.children.length > 0;
 }
 
 /**
  * Turn the consumer's columnDefs into (a) a Perspective schema + calc expressions
  * for the worker, and (b) the ColDefs the inner ag-grid gets. Pure and testable.
+ *
+ * Walks nested {@link ColGroupDef} children so fields like `assetClass` under
+ * header groups still enter the Perspective schema (otherwise SSRM row-grouping
+ * fails with `Invalid column 'assetClass'`).
  *
  * @param getFilterValues async provider of a column's distinct values, used to
  *   rewire `agSetColumnFilter` so set filters work under SSRM.
@@ -77,34 +94,54 @@ export function buildColumnOverride(
 ): ColumnOverrideResult {
   const schema: Record<string, PerspectiveColumnType> = {};
   const calcExpressions: Record<string, string> = {};
-  const agGridColumnDefs: ColDef[] = [];
   const sample = opts.sampleRow ?? {};
 
-  for (const def of columnDefs) {
-    const field = def.field;
+  const mapDef = (def: SSRMColDef): ColDef => {
     // Strip our two custom keys before handing the def to ag-grid.
-    const { perspectiveExpression, perspectiveType, ...agDef } = def;
+    const { perspectiveExpression, perspectiveType, children, ...rest } = def;
     void perspectiveType;
 
+    if (children?.length) {
+      return {
+        ...(rest as ColGroupDef),
+        children: children.map(mapDef),
+      } as ColDef;
+    }
+
+    const field = def.field;
+    const agDef: ColDef = { ...rest };
+
     if (field && perspectiveExpression) {
-      // Calculated column: computed in Perspective, not a real stored column.
       calcExpressions[field] = perspectiveExpression;
     } else if (field) {
       schema[field] = resolveType(def, sample[field]);
     }
 
-    // Rewire a set filter to pull distinct values from Perspective (server-side).
     if (field && agDef.filter === "agSetColumnFilter" && opts.getFilterValues) {
       const getValues = opts.getFilterValues;
       agDef.filterParams = {
         ...(agDef.filterParams as object | undefined),
+        suppressClearModelOnRefreshValues: true,
         values: (params: { success: (v: (string | null)[]) => void }) => {
           void getValues(field).then((vals) => params.success(vals));
         },
       };
     }
 
-    agGridColumnDefs.push(agDef as ColDef);
+    return agDef;
+  };
+
+  const agGridColumnDefs = columnDefs.map(mapDef);
+
+  // Safety net: any *scalar* field present on the sample row but missing from
+  // ColDefs (e.g. grouping dims only applied via column-customization) still
+  // needs a Perspective column or getRows fails with "Invalid column".
+  // Skip arrays/objects — they are not Perspective column types and cause
+  // "Cannot coerce array to string" on setRowData.
+  for (const [key, value] of Object.entries(sample)) {
+    if (key in schema || key in calcExpressions) continue;
+    const t = typeFromSample(value);
+    if (t) schema[key] = t;
   }
 
   // The index (getRowId) column must exist in the Perspective schema even if the
@@ -117,4 +154,17 @@ export function buildColumnOverride(
   }
 
   return { schema, calcExpressions, agGridColumnDefs };
+}
+
+/** @internal exported for tests */
+export function collectLeafFieldsForTest(columnDefs: SSRMColDef[]): string[] {
+  const fields: string[] = [];
+  const walk = (defs: SSRMColDef[]) => {
+    for (const def of defs) {
+      if (isColGroup(def)) walk(def.children);
+      else if (def.field) fields.push(def.field);
+    }
+  };
+  walk(columnDefs);
+  return fields;
 }

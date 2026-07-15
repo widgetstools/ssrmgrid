@@ -9,12 +9,18 @@ import {
   type SchemaType,
 } from "../data/schemas";
 import type { DatasetId, SsrmGetRowsRequest, SsrmSortEntry } from "../ssrm/types";
+import {
+  foldTrafficLight,
+  isTrafficLightAgg,
+} from "../ssrm/trafficLightAgg";
 import { absSortExprName } from "./perspectiveExpr";
+import { aggregateAlias } from "./sumTotals";
 import {
   applyPostPredicate,
   mapFilterModel,
   mergeFilterPlans,
   quickFilterToPlan,
+  rowKeepExpressionToPlan,
   type FilterPlan,
   type PerspectiveFilter,
 } from "./ssrmFilters";
@@ -81,6 +87,23 @@ export function getStringColumns(dataset: DatasetId): string[] {
   return Object.entries(schema)
     .filter(([, t]) => t === "string")
     .map(([k]) => k);
+}
+
+/**
+ * String columns searched by quick filter. Excludes the dataset primary key
+ * (IDs rarely belong in "search"). Optional `fields` further restricts the set.
+ */
+export function getQuickFilterColumns(
+  dataset: DatasetId,
+  fields?: string[],
+): string[] {
+  const pk = getDatasetPrimaryKey(dataset);
+  const stringCols = getStringColumns(dataset).filter((k) => k !== pk);
+  if (fields && fields.length > 0) {
+    const allowed = new Set(fields);
+    return stringCols.filter((k) => allowed.has(k));
+  }
+  return stringCols;
 }
 
 const AGG_FUNC_MAP: Record<string, string> = {
@@ -263,14 +286,51 @@ function mergeFilters(
   };
 }
 
+export type ValueAggPlan = {
+  aggregates: Record<string, string>;
+  measureColumns: string[];
+  expressions: Record<string, string>;
+};
+
+/** Perspective aggregates for value cols; trafficLight expands to min+max aliases. */
+export function buildValueAggPlan(
+  valueCols: SsrmGetRowsRequest["valueCols"],
+  /** When a trafficLight field is a Perspective calc, inline its expression into aliases
+   *  (Perspective rejects aggregating via `"calcCol"` expression references). */
+  calcExpressions?: Record<string, string>,
+): ValueAggPlan {
+  const aggregates: Record<string, string> = {};
+  const measureColumns: string[] = [];
+  const expressions: Record<string, string> = {};
+
+  for (const valueCol of valueCols) {
+    const field = valueCol.field;
+    if (!field) continue;
+
+    if (isTrafficLightAgg(valueCol.aggFunc)) {
+      const minAlias = aggregateAlias(field, "min");
+      const maxAlias = aggregateAlias(field, "max");
+      const sourceExpr = calcExpressions?.[field] ?? `"${field}"`;
+      expressions[minAlias] = sourceExpr;
+      expressions[maxAlias] = sourceExpr;
+      aggregates[minAlias] = "min";
+      aggregates[maxAlias] = "max";
+      if (!measureColumns.includes(minAlias)) measureColumns.push(minAlias);
+      if (!measureColumns.includes(maxAlias)) measureColumns.push(maxAlias);
+      continue;
+    }
+
+    aggregates[field] = mapAggFunc(valueCol.aggFunc);
+    if (!measureColumns.includes(field)) measureColumns.push(field);
+  }
+
+  return { aggregates, measureColumns, expressions };
+}
+
 function buildValueAggregates(
   valueCols: SsrmGetRowsRequest["valueCols"],
 ): Record<string, string> {
-  const aggregates: Record<string, string> = {};
-  for (const valueCol of valueCols) {
-    aggregates[valueCol.field] = mapAggFunc(valueCol.aggFunc);
-  }
-  return aggregates;
+  return buildValueAggPlan(valueCols).aggregates;
 }
 
 function filterNamedCols<T extends { field: string }>(cols: T[]): T[] {
@@ -371,8 +431,13 @@ function mapPivotRequestToView(
   dataset?: DatasetId,
 ): MappedQuery {
   const splitBy = pivotCols.map((c) => c.field);
-  const valueFields = valueCols.map((c) => c.field);
-  const valueAggregates = buildValueAggregates(valueCols);
+  const valueAggPlan = buildValueAggPlan(
+    valueCols,
+    dataset ? getCalculatedExpressions(dataset) : undefined,
+  );
+  const valueFields = valueAggPlan.measureColumns;
+  const valueAggregates = valueAggPlan.aggregates;
+  const valueExpressions = valueAggPlan.expressions;
   const { filter, filter_op, postPredicate, expressions: filterExprs } =
     filterExtras;
   const sortModel = withAbsSortFlags(
@@ -404,7 +469,7 @@ function mapPivotRequestToView(
       mode: "pivot",
       viewConfig: finalizeView(
         {
-          expressions: { [PIVOT_ROOT_EXPR]: "1" },
+          expressions: { [PIVOT_ROOT_EXPR]: "1", ...valueExpressions },
           group_by: [PIVOT_ROOT_EXPR],
           ...(splitBy.length > 0 ? { split_by: splitBy } : {}),
           columns: valueFields,
@@ -454,6 +519,8 @@ function mapPivotRequestToView(
   const pivotView: PerspectiveViewConfig = {
     group_by: [groupField],
     columns: valueFields,
+    expressions:
+      Object.keys(valueExpressions).length > 0 ? valueExpressions : undefined,
     aggregates: {
       ...valueAggregates,
       [groupField]: "any",
@@ -523,9 +590,13 @@ export function mapSsrmRequestToView(
   const columnFilters = mapFilterModel(request.filterModel);
   const quickPlan = quickFilterToPlan(
     request.quickFilterText,
-    getStringColumns(resolvedDataset),
+    getQuickFilterColumns(resolvedDataset, request.quickFilterFields),
   );
-  const combinedPlan = mergeFilterPlans([columnFilters, quickPlan], "and");
+  const keepPlan = rowKeepExpressionToPlan(request.rowKeepExpression);
+  const combinedPlan = mergeFilterPlans(
+    [columnFilters, quickPlan, keepPlan],
+    "and",
+  );
   const filterExtras = mergeFilters(ancestorFilters, combinedPlan);
   const { filter, filter_op, postPredicate, expressions: filterExprs } =
     filterExtras;
@@ -637,16 +708,18 @@ export function mapSsrmRequestToView(
     },
   );
 
+  const valueAggPlan = buildValueAggPlan(
+    valueCols,
+    resolvedDataset ? getCalculatedExpressions(resolvedDataset) : undefined,
+  );
   const aggregates = {
-    ...buildValueAggregates(valueCols),
+    ...valueAggPlan.aggregates,
     [groupField]: "any",
     [countAggField]: "count",
   };
   const columns = [
     groupField,
-    ...valueCols
-      .map((valueCol) => valueCol.field)
-      .filter((field) => field !== groupField),
+    ...valueAggPlan.measureColumns.filter((field) => field !== groupField),
     countAggField,
   ];
 
@@ -657,6 +730,10 @@ export function mapSsrmRequestToView(
         group_by: [groupField],
         columns,
         aggregates,
+        expressions:
+          Object.keys(valueAggPlan.expressions).length > 0
+            ? valueAggPlan.expressions
+            : undefined,
         filter,
         filter_op,
         sort: perspectiveSort,
@@ -691,7 +768,13 @@ export function shapeGroupRows(
       if (!valueCol.field || valueCol.field === groupField) {
         continue;
       }
-      shaped[valueCol.field] = row[valueCol.field];
+      if (isTrafficLightAgg(valueCol.aggFunc)) {
+        const minAlias = aggregateAlias(valueCol.field, "min");
+        const maxAlias = aggregateAlias(valueCol.field, "max");
+        shaped[valueCol.field] = foldTrafficLight(row[minAlias], row[maxAlias]);
+      } else {
+        shaped[valueCol.field] = row[valueCol.field];
+      }
     }
 
     return shaped;

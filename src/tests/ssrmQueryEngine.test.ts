@@ -6,13 +6,16 @@ import {
   COUNT_AGG_FIELD,
   PIVOT_ROOT_EXPR,
   applyClientSort,
+  buildValueAggPlan,
   collectPivotResultFields,
+  getQuickFilterColumns,
   mapAggFunc,
   mapSsrmRequestToView,
   shapeGroupRows,
   shapeLeafRows,
   shapePivotRows,
 } from "../workers/ssrmQueryEngine";
+import { aggregateAlias } from "../workers/sumTotals";
 
 const BASE_ROW_GROUP_COLS: SsrmGetRowsRequest["rowGroupCols"] = [
   { id: "desk", field: "desk", displayName: "Desk" },
@@ -357,6 +360,88 @@ describe("collectPivotResultFields", () => {
       ),
     ).toEqual(["USD|notionalAmount", "EUR|notionalAmount"]);
   });
+
+  it("keeps multi-value measure paths under each pivot key", () => {
+    const multiValue = [
+      { id: "notionalAmount", field: "notionalAmount", aggFunc: "sum" },
+      { id: "pnl", field: "pnl", aggFunc: "sum" },
+    ];
+    expect(
+      collectPivotResultFields(
+        [
+          "USD|notionalAmount",
+          "USD|pnl",
+          "EUR|notionalAmount",
+          "EUR|pnl",
+          "USD|desk",
+        ],
+        multiValue,
+      ),
+    ).toEqual([
+      "USD|notionalAmount",
+      "USD|pnl",
+      "EUR|notionalAmount",
+      "EUR|pnl",
+    ]);
+  });
+});
+
+describe("multi-pivot / multi-value mapping", () => {
+  it("maps multiple pivot columns into split_by", () => {
+    const mapped = mapSsrmRequestToView(
+      makeRequest({
+        pivotMode: true,
+        pivotCols: [
+          { id: "currency", field: "currency", displayName: "CCY" },
+          { id: "region", field: "region", displayName: "Region" },
+        ],
+        valueCols: [
+          { id: "notionalAmount", field: "notionalAmount", aggFunc: "sum" },
+          { id: "pnl", field: "pnl", aggFunc: "avg" },
+        ],
+        groupKeys: [],
+      }),
+    );
+
+    expect(mapped.mode).toBe("pivot");
+    expect(mapped.viewConfig.split_by).toEqual(["currency", "region"]);
+    expect(mapped.viewConfig.columns).toEqual(["notionalAmount", "pnl"]);
+    expect(mapped.viewConfig.aggregates).toMatchObject({
+      notionalAmount: "sum",
+      pnl: "avg",
+    });
+  });
+
+  it("shapes multi-pivot result paths with multiple measures", () => {
+    const shaped = shapePivotRows(
+      [
+        {
+          __ROW_PATH__: ["IG Credit"],
+          "USD|NA|notionalAmount": 100,
+          "USD|NA|pnl": 5,
+          "EUR|EMEA|notionalAmount": 50,
+          "EUR|EMEA|pnl": 2,
+        },
+      ],
+      {
+        groupField: "desk",
+        valueCols: [
+          { id: "notionalAmount", field: "notionalAmount", aggFunc: "sum" },
+          { id: "pnl", field: "pnl", aggFunc: "sum" },
+        ],
+        suppressChildren: true,
+      },
+    );
+
+    expect(shaped[0]).toMatchObject({
+      desk: "IG Credit",
+      childCount: 0,
+      "USD|NA|notionalAmount": 100,
+      "USD|NA|pnl": 5,
+      "EUR|EMEA|notionalAmount": 50,
+      "EUR|EMEA|pnl": 2,
+    });
+  });
 });
 
 describe("shapeGroupRows", () => {
@@ -382,6 +467,61 @@ describe("shapeGroupRows", () => {
       },
     ]);
   });
+
+  it("folds trafficLight min/max aliases into a single RAG value", () => {
+    const field = "ragStatus";
+    const minAlias = aggregateAlias(field, "min");
+    const maxAlias = aggregateAlias(field, "max");
+    const valueCols: SsrmGetRowsRequest["valueCols"] = [
+      { id: field, field, aggFunc: "trafficLight" },
+    ];
+
+    const shaped = shapeGroupRows(
+      [
+        {
+          desk: "IG Credit",
+          [minAlias]: 1,
+          [maxAlias]: 3,
+          [COUNT_AGG_FIELD]: 10,
+        },
+      ],
+      "desk",
+      valueCols,
+    );
+
+    expect(shaped[0]?.[field]).toBe(2);
+  });
+});
+
+describe("buildValueAggPlan", () => {
+  it("expands trafficLight to min+max aliases instead of raw agg name", () => {
+    const plan = buildValueAggPlan([
+      { id: "ragStatus", field: "ragStatus", aggFunc: "trafficLight" },
+    ]);
+
+    expect(plan.aggregates).toEqual({
+      [aggregateAlias("ragStatus", "min")]: "min",
+      [aggregateAlias("ragStatus", "max")]: "max",
+    });
+    expect(plan.aggregates).not.toHaveProperty("ragStatus");
+    expect(plan.measureColumns).toEqual([
+      aggregateAlias("ragStatus", "min"),
+      aggregateAlias("ragStatus", "max"),
+    ]);
+    expect(plan.expressions[aggregateAlias("ragStatus", "min")]).toBe(
+      '"ragStatus"',
+    );
+  });
+
+  it("inlines calc expressions into trafficLight min/max aliases", () => {
+    const calc = 'if("price" >= 105, 1, if("price" >= 95, 2, 3))';
+    const plan = buildValueAggPlan(
+      [{ id: "trafficlight", field: "trafficlight", aggFunc: "trafficLight" }],
+      { trafficlight: calc },
+    );
+    expect(plan.expressions[aggregateAlias("trafficlight", "min")]).toBe(calc);
+    expect(plan.expressions[aggregateAlias("trafficlight", "max")]).toBe(calc);
+  });
 });
 
 describe("shapeLeafRows", () => {
@@ -396,6 +536,21 @@ describe("shapeLeafRows", () => {
     ];
 
     expect(shapeLeafRows(rows)).toEqual(rows);
+  });
+});
+
+describe("getQuickFilterColumns", () => {
+  it("excludes the primary key from searchable strings", () => {
+    expect(getQuickFilterColumns("positions")).toEqual([
+      "desk",
+      "bookName",
+    ]);
+  });
+
+  it("restricts to the provided field list", () => {
+    expect(getQuickFilterColumns("positions", ["desk", "pnl"])).toEqual([
+      "desk",
+    ]);
   });
 });
 
@@ -426,12 +581,46 @@ describe("mapSsrmRequestToView tree + quick filter + calc cols", () => {
     );
     expect(mapped.mode).toBe("leaf");
     expect(mapped.viewConfig.expressions?.pnlPct).toContain("pnl");
-    expect(mapped.viewConfig.expressions?.__ssrm_quick_filter).toContain(
-      "credit",
-    );
+    const qf = mapped.viewConfig.expressions?.__ssrm_quick_filter ?? "";
+    expect(qf).toContain("match(lower(");
+    expect(qf).toContain("credit");
+    // PK excluded from searchable columns
+    expect(qf).not.toContain("positionId");
     expect(mapped.viewConfig.filter).toEqual([
       ["__ssrm_quick_filter", "==", true],
     ]);
+  });
+
+  it("attaches rowKeepExpression as __ssrm_row_keep", () => {
+    const mapped = mapSsrmRequestToView(
+      makeRequest({
+        rowGroupCols: [],
+        rowKeepExpression: 'not("ccy" == \'INR\')',
+      }),
+      COUNT_AGG_FIELD,
+      "positions",
+    );
+    expect(mapped.viewConfig.expressions?.__ssrm_row_keep).toBe(
+      'not("ccy" == \'INR\')',
+    );
+    expect(mapped.viewConfig.filter).toEqual([
+      ["__ssrm_row_keep", "==", true],
+    ]);
+  });
+
+  it("honors quickFilterFields restriction", () => {
+    const mapped = mapSsrmRequestToView(
+      makeRequest({
+        rowGroupCols: [],
+        quickFilterText: "x",
+        quickFilterFields: ["desk"],
+      }),
+      COUNT_AGG_FIELD,
+      "positions",
+    );
+    const qf = mapped.viewConfig.expressions?.__ssrm_quick_filter ?? "";
+    expect(qf).toContain('"desk"');
+    expect(qf).not.toContain("bookName");
   });
 
   it("marks abs sort with synthetic expression", () => {

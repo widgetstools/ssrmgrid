@@ -3,7 +3,50 @@ import { SSRMGrid, type SSRMGridHandle } from "./ssrmgrid/SSRMGrid";
 import type { SSRMColDef } from "./ssrmgrid/columnOverride";
 import { generateRows, startTicking, type DemoRow } from "./demo/tickEngine";
 
-const ROW_COUNT = 5000;
+const ROW_COUNT = 50_000;
+
+const numFmt2 = (p: { value?: unknown }) =>
+  typeof p.value === "number" ? p.value.toFixed(2) : "";
+const numFmt1 = (p: { value?: unknown }) =>
+  typeof p.value === "number" ? p.value.toFixed(1) : "";
+const numFmtInt = (p: { value?: unknown }) =>
+  typeof p.value === "number" ? p.value.toLocaleString() : "";
+const pnlStyle = (p: { value?: unknown }) =>
+  typeof p.value === "number"
+    ? { color: p.value < 0 ? "#c0392b" : "#1e8449" }
+    : null;
+
+function dim(field: string, headerName?: string, width?: number): SSRMColDef {
+  return {
+    field,
+    ...(headerName ? { headerName } : {}),
+    enableRowGroup: true,
+    filter: "agSetColumnFilter",
+    ...(width != null ? { width } : {}),
+  };
+}
+
+function measure(
+  field: string,
+  opts?: {
+    headerName?: string;
+    aggFunc?: string;
+    formatter?: (p: { value?: unknown }) => string;
+    style?: boolean;
+    width?: number;
+  },
+): SSRMColDef {
+  return {
+    field,
+    cellDataType: "number",
+    filter: "agNumberColumnFilter",
+    ...(opts?.headerName ? { headerName: opts.headerName } : {}),
+    ...(opts?.aggFunc ? { aggFunc: opts.aggFunc } : { aggFunc: "sum" }),
+    ...(opts?.formatter ? { valueFormatter: opts.formatter } : {}),
+    ...(opts?.style ? { cellStyle: pnlStyle } : {}),
+    ...(opts?.width != null ? { width: opts.width } : {}),
+  };
+}
 
 export default function App() {
   const gridRef = useRef<SSRMGridHandle>(null);
@@ -16,39 +59,53 @@ export default function App() {
 
   const columnDefs = useMemo<SSRMColDef[]>(
     () => [
-      { field: "book", enableRowGroup: true, rowGroup: true, hide: true, filter: "agSetColumnFilter" },
-      { field: "trader", enableRowGroup: true, filter: "agSetColumnFilter" },
-      { field: "region", enableRowGroup: true, filter: "agSetColumnFilter" },
-      { field: "currency", headerName: "Ccy", enableRowGroup: true, filter: "agSetColumnFilter", width: 90 },
-      { field: "instrumentType", headerName: "Type", enableRowGroup: true, filter: "agSetColumnFilter" },
-      {
-        field: "price",
-        cellDataType: "number",
-        filter: "agNumberColumnFilter",
-        aggFunc: "avg",
-        valueFormatter: (p) => (typeof p.value === "number" ? p.value.toFixed(2) : ""),
-      },
-      { field: "quantity", headerName: "Qty", cellDataType: "number", filter: "agNumberColumnFilter", aggFunc: "sum" },
-      {
-        field: "notional",
-        cellDataType: "number",
-        filter: "agNumberColumnFilter",
-        aggFunc: "sum",
-        valueFormatter: (p) => (typeof p.value === "number" ? p.value.toLocaleString() : ""),
-      },
-      {
-        field: "pnl",
-        headerName: "PnL",
-        cellDataType: "number",
-        filter: "agNumberColumnFilter",
-        aggFunc: "sum",
-        cellStyle: (p) =>
-          typeof p.value === "number" ? { color: p.value < 0 ? "#c0392b" : "#1e8449" } : null,
-        valueFormatter: (p) => (typeof p.value === "number" ? p.value.toLocaleString() : ""),
-      },
-      { field: "dailyPnl", headerName: "Daily PnL", cellDataType: "number", filter: "agNumberColumnFilter", aggFunc: "sum" },
-      // Calculated column — computed inside Perspective (server-side), so it
-      // aggregates/sorts/filters like a real column.
+      // Dimensions (stable under partial ticks — merge must preserve these)
+      dim("book"),
+      dim("desk"),
+      dim("trader"),
+      dim("region"),
+      dim("currency", "Ccy", 90),
+      dim("instrumentType", "Type"),
+      dim("sector"),
+      dim("issuer"),
+      dim("ticker", undefined, 90),
+      dim("cusip", undefined, 110),
+      dim("country", undefined, 80),
+      dim("exchange", undefined, 90),
+      dim("strategy"),
+      dim("counterparty", "CP"),
+      dim("settlement", "Settle", 80),
+      dim("rating", undefined, 80),
+      dim("tenor", undefined, 80),
+      // Core measures (tick)
+      measure("price", { aggFunc: "avg", formatter: numFmt2 }),
+      measure("quantity", { headerName: "Qty" }),
+      measure("notional", { formatter: numFmtInt }),
+      measure("pnl", { headerName: "PnL", formatter: numFmtInt, style: true }),
+      measure("dailyPnl", { headerName: "Daily PnL", formatter: numFmtInt, style: true }),
+      measure("bid", { aggFunc: "avg", formatter: numFmt2 }),
+      measure("ask", { aggFunc: "avg", formatter: numFmt2 }),
+      measure("mid", { aggFunc: "avg", formatter: numFmt2 }),
+      measure("spread", { aggFunc: "avg", formatter: numFmt2 }),
+      // Risk / greeks (tick)
+      measure("delta", { aggFunc: "avg", formatter: numFmt2 }),
+      measure("gamma", { aggFunc: "avg", formatter: numFmt2 }),
+      measure("vega", { aggFunc: "avg", formatter: numFmt1 }),
+      measure("theta", { aggFunc: "avg", formatter: numFmt1 }),
+      measure("dv01", { headerName: "DV01", formatter: numFmtInt, style: true }),
+      measure("cs01", { headerName: "CS01", formatter: numFmtInt, style: true }),
+      measure("ytm", { headerName: "YTM", aggFunc: "avg", formatter: numFmt2 }),
+      measure("duration", { aggFunc: "avg", formatter: numFmt2 }),
+      measure("convexity", { aggFunc: "avg", formatter: numFmt1 }),
+      measure("volatility", { headerName: "Vol", aggFunc: "avg", formatter: numFmt1 }),
+      measure("beta", { aggFunc: "avg", formatter: numFmt2 }),
+      measure("volume", { formatter: numFmtInt }),
+      measure("openInterest", { headerName: "OI", formatter: numFmtInt }),
+      measure("margin", { formatter: numFmtInt }),
+      measure("haircut", { aggFunc: "avg", formatter: numFmt1 }),
+      measure("riskLimit", { headerName: "Limit", formatter: numFmtInt }),
+      measure("utilization", { headerName: "Util %", aggFunc: "avg", formatter: numFmt1 }),
+      // Perspective expressions (server-side)
       {
         field: "pnlBps",
         headerName: "PnL (bps)",
@@ -56,11 +113,27 @@ export default function App() {
         perspectiveExpression:
           '"notional" != 0 and "notional" != null ? "pnl" / "notional" * 10000 : null',
         aggFunc: "avg",
-        valueFormatter: (p) => (typeof p.value === "number" ? p.value.toFixed(1) : ""),
+        valueFormatter: numFmt1,
+      },
+      {
+        field: "trafficlight",
+        headerName: "RAG",
+        cellDataType: "number",
+        perspectiveExpression: 'if("price" >= 105, 1, if("price" >= 95, 2, 3))',
+        aggFunc: "trafficLight",
+        width: 90,
+        valueFormatter: (p) => {
+          if (p.value === 1) return "🟢";
+          if (p.value === 2) return "🟡";
+          if (p.value === 3) return "🔴";
+          return typeof p.value === "number" ? String(p.value) : "";
+        },
       },
     ],
     [],
   );
+
+  const colCount = columnDefs.length;
 
   // Master/detail: synthetic "fills" per position (stands in for any detail
   // fetch — REST, another Perspective table, etc.).
@@ -120,7 +193,8 @@ export default function App() {
       >
         <strong>&lt;SSRMGrid&gt;</strong>
         <span style={{ color: "#9aa4b0" }}>
-          AG Grid Enterprise (SSRM) · Perspective · {ROW_COUNT.toLocaleString()} rows, all ticking
+          AG Grid Enterprise (SSRM) · Perspective · {ROW_COUNT.toLocaleString()}{" "}
+          × {colCount} cols, all ticking
         </span>
         <input
           type="search"
@@ -158,7 +232,20 @@ export default function App() {
           getRowId="id"
           onTotals={setTotals}
           quickFilterText={quickFilter}
+          quickFilterFields={[
+            "book",
+            "desk",
+            "trader",
+            "region",
+            "currency",
+            "instrumentType",
+            "issuer",
+            "ticker",
+            "cusip",
+          ]}
           enableCharts
+          grandTotalRow="bottom"
+          groupTotalRow="bottom"
           masterDetail={{ detailColumnDefs, getDetailRowData }}
         />
       </div>
