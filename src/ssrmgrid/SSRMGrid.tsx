@@ -18,6 +18,7 @@ import type {
   GetDetailRowDataParams,
   GetRowIdParams,
   GridApi,
+  GridReadyEvent,
   IServerSideGroupSelectionState,
   IServerSideSelectionState,
   MenuItemDef,
@@ -176,13 +177,23 @@ export interface SSRMGridProps {
   /** Grid host height (default 100%). */
   height?: string | number;
   /**
-   * AG Grid theme. When omitted, uses ssrmgrid's built-in dark Quartz theme.
-   * Host apps (e.g. MarketsGrid) should pass their design-system theme so SSRM
-   * chrome matches CSRM.
+   * AG Grid theme. When omitted, uses ssrmgrid's built-in dark Quartz theme
+   * (standalone demo only). Host apps should pass their design-system theme.
    */
   theme?: Theme;
   /** Load Google Fonts referenced by the active theme (default: only for built-in theme). */
   loadThemeGoogleFonts?: boolean;
+  /** Host presentation overrides (MarketsGrid / design-system chrome). */
+  rowHeight?: number;
+  headerHeight?: number;
+  sideBar?: unknown;
+  statusBar?: unknown;
+  /** Extra AG Grid components map (e.g. stream-safe floating filters). */
+  components?: Record<string, unknown>;
+  /** Called after internal SSRM ready setup (configure may still be in flight). */
+  onGridReady?: (event: GridReadyEvent) => void;
+  suppressNoRowsOverlay?: boolean;
+  overlayNoRowsTemplate?: string;
 
   // ---- gap-closing options (all off/absent by default) -------------------
   /** Server-side quick filter (global search across text columns). */
@@ -854,9 +865,13 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       () => ({ headerName: "Group", minWidth: 240, flex: 1, pinned: "left" }),
       [],
     );
-    const sideBar = useMemo(() => ({ toolPanels: ["columns", "filters"] }), []);
-    const statusBar = useMemo(
-      () => ({
+    const sideBar = useMemo(
+      () => props.sideBar ?? { toolPanels: ["columns", "filters"] },
+      [props.sideBar],
+    );
+    const statusBar = useMemo(() => {
+      if (props.statusBar !== undefined) return props.statusBar;
+      return {
         // The built-in total/filtered row-count panels are client-side-row-model
         // only (they warn + render nothing under SSRM), so the leaf count comes
         // from a custom panel fed by the server-side count. Selected-count and
@@ -866,9 +881,8 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           { statusPanel: "agSelectedRowCountComponent", align: "right" as const },
           { statusPanel: "agAggregationComponent", align: "right" as const },
         ],
-      }),
-      [],
-    );
+      };
+    }, [props.statusBar]);
     const rowSelection = useMemo(
       () => ({
         mode: "multiRow" as const,
@@ -902,11 +916,16 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           serverSideDatasource={datasource}
           cacheBlockSize={100}
           animateRows
+          rowHeight={props.rowHeight}
+          headerHeight={props.headerHeight}
           cellFlashDuration={500}
           rowGroupPanelShow={treeData ? "never" : "always"}
           pivotPanelShow="always"
-          sideBar={sideBar}
-          statusBar={statusBar}
+          sideBar={sideBar as never}
+          statusBar={statusBar as never}
+          components={props.components as never}
+          suppressNoRowsOverlay={props.suppressNoRowsOverlay ?? true}
+          overlayNoRowsTemplate={props.overlayNoRowsTemplate ?? " "}
           rowSelection={rowSelection}
           cellSelection={cellSelection}
           undoRedoCellEditing
@@ -943,6 +962,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             else {
               purgeRefreshStores({ bumpGeneration: false });
             }
+            props.onGridReady?.(e);
           }}
         />
       </div>
