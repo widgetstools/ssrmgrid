@@ -153,14 +153,14 @@ export interface SSRMGridProps {
   /** Live-refresh throttle in ms (default 150). */
   refreshThrottleMs?: number;
   /**
-   * SSRM rows per fetched block (default 250). Larger = fewer getRows while
-   * scrolling; smaller = snappier first paint.
+   * SSRM rows per fetched block (default 200). Larger = fewer getRows while
+   * scrolling; smaller = snappier first paint of each block.
    */
   cacheBlockSize?: number;
   /**
-   * Wait this many ms after scrolling before loading a block (default 100).
-   * Lets fast wheel/trackpad/thumb scrolls skip over intermediate blocks so
-   * the viewport does not flash Loading on every block.
+   * Optional delay before loading a block while scrolling. Default **off**
+   * (undefined) — debounce causes blank gaps during fast wheel/trackpad flings.
+   * Only set if you explicitly want skip-over-block behaviour.
    */
   blockLoadDebounceMillis?: number;
   /**
@@ -1031,6 +1031,12 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       purgeRefreshStores();
     }, [purgeRefreshStores]);
 
+    // Soft-refresh from live ticks fights the scroll pipeline — quiet it while
+    // the user is flinging (wheel / trackpad / thumb).
+    const onBodyScroll = useCallback(() => {
+      tickQuietUntilRef.current = Date.now() + 280;
+    }, []);
+
     const defaultColDef = useMemo<ColDef>(
       () => ({
         flex: 1,
@@ -1046,9 +1052,6 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         enableRowGroup: true,
         enablePivot: true,
         enableCellChangeFlash: true,
-        // With suppressServerSideFullWidthLoadingRow, avoid per-cell "Loading…"
-        // text during fast scroll / block fetch (blank skeleton instead).
-        loadingCellRenderer: () => "",
         ...props.defaultColDef,
       }),
       [props.defaultColDef],
@@ -1106,13 +1109,13 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           autoGroupColumnDef={autoGroupColumnDef}
           rowModelType="serverSide"
           serverSideDatasource={datasource}
-          cacheBlockSize={props.cacheBlockSize ?? 250}
-          blockLoadDebounceMillis={props.blockLoadDebounceMillis ?? 100}
+          cacheBlockSize={props.cacheBlockSize ?? 200}
           maxBlocksInCache={props.maxBlocksInCache ?? 40}
-          maxConcurrentDatasourceRequests={2}
-          // Fast scroll: skip full-width "Loading" rows; cells stay blank until
-          // the debounced block arrives (see defaultColDef.loadingCellRenderer).
-          suppressServerSideFullWidthLoadingRow
+          maxConcurrentDatasourceRequests={3}
+          rowBuffer={20}
+          {...(props.blockLoadDebounceMillis != null
+            ? { blockLoadDebounceMillis: props.blockLoadDebounceMillis }
+            : {})}
           animateRows={false}
           rowHeight={props.rowHeight}
           headerHeight={props.headerHeight}
@@ -1148,6 +1151,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           getChildCount={(data) =>
             typeof data?.childCount === "number" ? data.childCount : undefined
           }
+          onBodyScroll={onBodyScroll}
           onColumnRowGroupChanged={onStructureChanged}
           onColumnPivotChanged={onStructureChanged}
           onColumnPivotModeChanged={onStructureChanged}
