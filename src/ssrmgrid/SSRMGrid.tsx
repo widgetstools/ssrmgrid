@@ -566,16 +566,29 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         if (!configuredRef.current || ingestingRef.current) return;
         const api = apiRef.current;
         if (!api) return;
-        // Drop main-thread slices before soft/purge refresh so ticks stay live.
-        blockCacheRef.current.clear();
         const mode = applyWorkerDirtyToGrid(msg, {
+          applyLeafTransaction: (leaf) => {
+            // In-place SSRM patch — avoids soft-refreshing every loaded block
+            // on each tick (that was the main scroll jank under live updates).
+            if (leaf.update?.length) {
+              blockCacheRef.current.patchRows(idField, leaf.update);
+            }
+            api.applyServerSideTransaction({
+              ...(leaf.update?.length ? { update: leaf.update } : {}),
+              ...(leaf.add?.length ? { add: leaf.add } : {}),
+            });
+          },
           throttleRefresh: () => throttleRef.current?.(),
           purgeRefresh: () =>
             purgeRefreshStoresRef.current({ bumpGeneration: false }),
         });
         // Purge path already refreshes totals inside purgeRefreshStores.
+        // Surgical ticks: refresh totals only when not scrolling (worker is
+        // serial — totals queries steal bandwidth from block loads).
         if (mode === "surgical") {
-          void refreshTotalsRef.current();
+          if (Date.now() >= tickQuietUntilRef.current) {
+            void refreshTotalsRef.current();
+          }
         }
       });
       return () => {
@@ -583,7 +596,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         clientRef.current = null;
         configuredRef.current = false;
       };
-    }, []);
+    }, [idField]);
 
     // (Re)build the throttled refresh when the throttle changes.
     useEffect(() => {
@@ -1047,7 +1060,8 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     // Soft-refresh from live ticks fights the scroll pipeline — quiet it while
     // the user is flinging (wheel / trackpad / thumb).
     const onBodyScroll = useCallback(() => {
-      tickQuietUntilRef.current = Date.now() + 280;
+      // Suppress tick soft-refresh fallback while the user is flinging.
+      tickQuietUntilRef.current = Date.now() + 800;
     }, []);
 
     const defaultColDef = useMemo<ColDef>(

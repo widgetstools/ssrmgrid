@@ -66,6 +66,35 @@ export class SsrmBlockCache {
   }
 
   /**
+   * Merge leaf updates into any cached block rows that share `idField`.
+   * Keeps sync scroll hits consistent with surgical grid transactions.
+   */
+  patchRows(
+    idField: string,
+    updates: Record<string, unknown>[],
+  ): number {
+    if (updates.length === 0) return 0;
+    const byId = new Map<unknown, Record<string, unknown>>();
+    for (const row of updates) {
+      const id = row[idField];
+      if (id !== undefined && id !== null) byId.set(id, row);
+    }
+    if (byId.size === 0) return 0;
+
+    let patched = 0;
+    for (const block of this.blocks.values()) {
+      for (let i = 0; i < block.rowData.length; i++) {
+        const row = block.rowData[i]!;
+        const next = byId.get(row[idField]);
+        if (!next) continue;
+        block.rowData[i] = { ...row, ...next };
+        patched += 1;
+      }
+    }
+    return patched;
+  }
+
+  /**
    * Return cached value, join an in-flight load, or run `loader` once.
    */
   getOrLoad(

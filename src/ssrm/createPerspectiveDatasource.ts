@@ -102,60 +102,10 @@ export function createPerspectiveDatasource(
   ) => void,
   /**
    * Optional main-thread block cache. Hits call `params.success` synchronously.
-   * Host should `clear()` on dirty / purge so soft-refresh does not serve stale ticks.
+   * Host should `clear()` on purge; leaf ticks should `patchRows` instead.
    */
   blockCache?: SsrmBlockCache,
 ): IServerSideDatasource {
-  const prefetchNeighbor = (
-    keyParts: BlockCacheKeyParts,
-    direction: -1 | 1,
-  ) => {
-    if (!blockCache) return;
-    const len = keyParts.endRow - keyParts.startRow;
-    if (len <= 0) return;
-    const startRow = keyParts.startRow + direction * len;
-    if (startRow < 0) return;
-    const endRow = startRow + len;
-    const neighborKey = fingerprintBlockRequest({ ...keyParts, startRow, endRow });
-    if (blockCache.get(neighborKey)) return;
-
-    const client = getClient();
-    if (!client || !getExtras?.().isConfigured) return;
-
-    void blockCache.getOrLoad(neighborKey, async () => {
-      const extras = getExtras?.() ?? {};
-      const result = await client.getRows({
-        dataset: keyParts.dataset,
-        startRow,
-        endRow,
-        rowGroupCols: keyParts.rowGroupCols.map((c) => ({
-          id: c.id,
-          field: c.field,
-          displayName: c.field,
-        })),
-        valueCols: keyParts.valueCols,
-        pivotCols: keyParts.pivotCols.map((c) => ({
-          id: c.id,
-          field: c.field,
-          displayName: c.field,
-        })),
-        pivotMode: keyParts.pivotMode,
-        groupKeys: keyParts.groupKeys,
-        filterModel: keyParts.filterModel,
-        sortModel: keyParts.sortModel.map((s) => ({
-          colId: s.colId,
-          sort: s.sort as "asc" | "desc",
-        })),
-        quickFilterText: extras.quickFilterText,
-        quickFilterFields: extras.quickFilterFields,
-        treeData: extras.treeData,
-        absSort: extras.absSort,
-        rowKeepExpression: extras.rowKeepExpression,
-      });
-      return toCached(result);
-    });
-  };
-
   return {
     getRows(params) {
       const client = getClient();
@@ -230,11 +180,6 @@ export function createPerspectiveDatasource(
             : {}),
           ...(grandTotalData ? { grandTotalData } : {}),
         });
-
-        if (blockCache) {
-          prefetchNeighbor(keyParts, 1);
-          prefetchNeighbor(keyParts, -1);
-        }
       };
 
       // Sync path: main-thread cache hit → no Loading flash.

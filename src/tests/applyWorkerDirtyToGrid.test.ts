@@ -3,7 +3,32 @@ import { describe, expect, it, vi } from "vitest";
 import { applyWorkerDirtyToGrid } from "../ssrm/applyWorkerDirtyToGrid";
 
 describe("applyWorkerDirtyToGrid", () => {
-  it("soft-refreshes on leaf update", () => {
+  it("applies surgical leaf transaction when provided", () => {
+    const applyLeafTransaction = vi.fn();
+    const throttleRefresh = vi.fn();
+    const purgeRefresh = vi.fn();
+
+    const mode = applyWorkerDirtyToGrid(
+      {
+        type: "dirty",
+        at: 1,
+        transaction: {
+          dataset: "main",
+          update: [{ id: "a", mid: 1 }],
+        },
+      },
+      { applyLeafTransaction, throttleRefresh, purgeRefresh },
+    );
+
+    expect(mode).toBe("surgical");
+    expect(applyLeafTransaction).toHaveBeenCalledWith({
+      update: [{ id: "a", mid: 1 }],
+    });
+    expect(throttleRefresh).not.toHaveBeenCalled();
+    expect(purgeRefresh).not.toHaveBeenCalled();
+  });
+
+  it("falls back to soft-refresh when surgical tx is unavailable", () => {
     const throttleRefresh = vi.fn();
     const purgeRefresh = vi.fn();
 
@@ -24,7 +49,7 @@ describe("applyWorkerDirtyToGrid", () => {
     expect(purgeRefresh).not.toHaveBeenCalled();
   });
 
-  it("soft-refreshes on leaf add", () => {
+  it("soft-refreshes on leaf add when no surgical handler", () => {
     const throttleRefresh = vi.fn();
     const purgeRefresh = vi.fn();
 
@@ -67,7 +92,6 @@ describe("applyWorkerDirtyToGrid", () => {
       },
       { throttleRefresh, purgeRefresh },
     );
-
     expect(purgeRefresh).toHaveBeenCalledTimes(1);
   });
 });

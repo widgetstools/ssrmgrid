@@ -59,6 +59,23 @@ describe("SsrmBlockCache", () => {
     await expect(p).resolves.toEqual({ rowData: [], rowCount: 0 });
     expect(cache.size).toBe(0);
   });
+
+  it("patchRows merges updates by id into cached blocks", () => {
+    const cache = new SsrmBlockCache();
+    cache.set("b0", {
+      rowData: [
+        { id: "a", mid: 1 },
+        { id: "b", mid: 2 },
+      ],
+      rowCount: 2,
+    });
+    const n = cache.patchRows("id", [{ id: "b", mid: 99 }]);
+    expect(n).toBe(1);
+    expect(cache.get("b0")?.rowData).toEqual([
+      { id: "a", mid: 1 },
+      { id: "b", mid: 99 },
+    ]);
+  });
 });
 
 describe("createPerspectiveDatasource sync cache", () => {
@@ -84,7 +101,7 @@ describe("createPerspectiveDatasource sync cache", () => {
     };
   }
 
-  it("calls params.success synchronously on cache hit", async () => {
+  it("calls params.success synchronously on cache hit", () => {
     const cache = new SsrmBlockCache();
     const key = fingerprintBlockRequest({
       dataset: "main",
@@ -104,10 +121,7 @@ describe("createPerspectiveDatasource sync cache", () => {
       rowCount: 1,
     });
 
-    const getRows = vi.fn(async () => ({
-      rowData: [{ id: "prefetch" }],
-      rowCount: 1,
-    }));
+    const getRows = vi.fn();
     const ds = createPerspectiveDatasource(
       () => ({ getRows }) as never,
       () => "main",
@@ -124,10 +138,8 @@ describe("createPerspectiveDatasource sync cache", () => {
       rowData: [{ id: "a" }],
       rowCount: 1,
     });
+    expect(getRows).not.toHaveBeenCalled();
     expect(params.fail).not.toHaveBeenCalled();
-    // Neighbor prefetch may fire async; primary block did not need the worker.
-    await vi.waitFor(() => expect(getRows.mock.calls.length).toBeGreaterThan(0));
-    expect(getRows.mock.calls[0]![0].startRow).toBe(100);
   });
 
   it("fetches async on miss then serves sync on repeat", async () => {
@@ -149,8 +161,7 @@ describe("createPerspectiveDatasource sync cache", () => {
     expect(first.success).not.toHaveBeenCalled();
 
     await vi.waitFor(() => expect(first.success).toHaveBeenCalledTimes(1));
-    const callsAfterFirst = getRows.mock.calls.length;
-    expect(callsAfterFirst).toBeGreaterThanOrEqual(1);
+    expect(getRows).toHaveBeenCalledTimes(1);
 
     const second = mockParams();
     ds.getRows(second as never);
@@ -159,7 +170,6 @@ describe("createPerspectiveDatasource sync cache", () => {
       rowData: [{ id: "b" }],
       rowCount: 10,
     });
-    // Sync hit must not issue another primary fetch (prefetch may already have).
-    expect(getRows.mock.calls.length).toBe(callsAfterFirst);
+    expect(getRows).toHaveBeenCalledTimes(1);
   });
 });
