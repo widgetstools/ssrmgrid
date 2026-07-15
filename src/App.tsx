@@ -17,24 +17,24 @@ const TICK_PRESETS = [
 const DEFAULT_TICK_RATE = 10_000;
 const MAX_TICK_RATE = 20_000;
 
-const numFmt2 = (p: { value?: unknown }) =>
-  typeof p.value === "number" ? p.value.toFixed(2) : "";
-const numFmt1 = (p: { value?: unknown }) =>
-  typeof p.value === "number" ? p.value.toFixed(1) : "";
-const numFmtInt = (p: { value?: unknown }) =>
-  typeof p.value === "number" ? p.value.toLocaleString() : "";
 const pnlStyle = (p: { value?: unknown }) =>
   typeof p.value === "number"
     ? { color: p.value < 0 ? "#c0392b" : "#1e8449" }
     : null;
 
-function dim(field: string, headerName?: string, width?: number): SSRMColDef {
+function dim(
+  field: string,
+  headerName?: string,
+  width?: number,
+  opts?: { rowGroup?: boolean },
+): SSRMColDef {
   return {
     field,
     ...(headerName ? { headerName } : {}),
     enableRowGroup: true,
     filter: "agSetColumnFilter",
     ...(width != null ? { width } : {}),
+    ...(opts?.rowGroup ? { rowGroup: true, hide: true } : {}),
   };
 }
 
@@ -43,7 +43,6 @@ function measure(
   opts?: {
     headerName?: string;
     aggFunc?: string;
-    formatter?: (p: { value?: unknown }) => string;
     style?: boolean;
     width?: number;
   },
@@ -54,7 +53,6 @@ function measure(
     filter: "agNumberColumnFilter",
     ...(opts?.headerName ? { headerName: opts.headerName } : {}),
     ...(opts?.aggFunc ? { aggFunc: opts.aggFunc } : { aggFunc: "sum" }),
-    ...(opts?.formatter ? { valueFormatter: opts.formatter } : {}),
     ...(opts?.style ? { cellStyle: pnlStyle } : {}),
     ...(opts?.width != null ? { width: opts.width } : {}),
   };
@@ -71,8 +69,9 @@ export default function App() {
 
   const columnDefs = useMemo<SSRMColDef[]>(
     () => [
-      // Dimensions (stable under partial ticks — merge must preserve these)
-      dim("book"),
+      // Dimensions (stable under partial ticks — merge must preserve these).
+      // Demo opens grouped by book so group-agg + tick path is stressed.
+      dim("book", undefined, undefined, { rowGroup: true }),
       dim("desk"),
       dim("trader"),
       dim("region"),
@@ -89,34 +88,34 @@ export default function App() {
       dim("settlement", "Settle", 80),
       dim("rating", undefined, 80),
       dim("tenor", undefined, 80),
-      // Core measures (tick)
-      measure("price", { aggFunc: "avg", formatter: numFmt2 }),
+      // Core measures (tick) — raw numbers (no valueFormatter) for tick/flash debugging.
+      measure("price", { aggFunc: "avg" }),
       measure("quantity", { headerName: "Qty" }),
-      measure("notional", { formatter: numFmtInt }),
-      measure("pnl", { headerName: "PnL", formatter: numFmtInt, style: true }),
-      measure("dailyPnl", { headerName: "Daily PnL", formatter: numFmtInt, style: true }),
-      measure("bid", { aggFunc: "avg", formatter: numFmt2 }),
-      measure("ask", { aggFunc: "avg", formatter: numFmt2 }),
-      measure("mid", { aggFunc: "avg", formatter: numFmt2 }),
-      measure("spread", { aggFunc: "avg", formatter: numFmt2 }),
+      measure("notional"),
+      measure("pnl", { headerName: "PnL", style: true }),
+      measure("dailyPnl", { headerName: "Daily PnL", style: true }),
+      measure("bid", { aggFunc: "avg" }),
+      measure("ask", { aggFunc: "avg" }),
+      measure("mid", { aggFunc: "avg" }),
+      measure("spread", { aggFunc: "avg" }),
       // Risk / greeks (tick)
-      measure("delta", { aggFunc: "avg", formatter: numFmt2 }),
-      measure("gamma", { aggFunc: "avg", formatter: numFmt2 }),
-      measure("vega", { aggFunc: "avg", formatter: numFmt1 }),
-      measure("theta", { aggFunc: "avg", formatter: numFmt1 }),
-      measure("dv01", { headerName: "DV01", formatter: numFmtInt, style: true }),
-      measure("cs01", { headerName: "CS01", formatter: numFmtInt, style: true }),
-      measure("ytm", { headerName: "YTM", aggFunc: "avg", formatter: numFmt2 }),
-      measure("duration", { aggFunc: "avg", formatter: numFmt2 }),
-      measure("convexity", { aggFunc: "avg", formatter: numFmt1 }),
-      measure("volatility", { headerName: "Vol", aggFunc: "avg", formatter: numFmt1 }),
-      measure("beta", { aggFunc: "avg", formatter: numFmt2 }),
-      measure("volume", { formatter: numFmtInt }),
-      measure("openInterest", { headerName: "OI", formatter: numFmtInt }),
-      measure("margin", { formatter: numFmtInt }),
-      measure("haircut", { aggFunc: "avg", formatter: numFmt1 }),
-      measure("riskLimit", { headerName: "Limit", formatter: numFmtInt }),
-      measure("utilization", { headerName: "Util %", aggFunc: "avg", formatter: numFmt1 }),
+      measure("delta", { aggFunc: "avg" }),
+      measure("gamma", { aggFunc: "avg" }),
+      measure("vega", { aggFunc: "avg" }),
+      measure("theta", { aggFunc: "avg" }),
+      measure("dv01", { headerName: "DV01", style: true }),
+      measure("cs01", { headerName: "CS01", style: true }),
+      measure("ytm", { headerName: "YTM", aggFunc: "avg" }),
+      measure("duration", { aggFunc: "avg" }),
+      measure("convexity", { aggFunc: "avg" }),
+      measure("volatility", { headerName: "Vol", aggFunc: "avg" }),
+      measure("beta", { aggFunc: "avg" }),
+      measure("volume"),
+      measure("openInterest", { headerName: "OI" }),
+      measure("margin"),
+      measure("haircut", { aggFunc: "avg" }),
+      measure("riskLimit", { headerName: "Limit" }),
+      measure("utilization", { headerName: "Util %", aggFunc: "avg" }),
       // Perspective expressions (server-side)
       {
         field: "pnlBps",
@@ -125,7 +124,6 @@ export default function App() {
         perspectiveExpression:
           '"notional" != 0 and "notional" != null ? "pnl" / "notional" * 10000 : null',
         aggFunc: "avg",
-        valueFormatter: numFmt1,
       },
       {
         field: "trafficlight",
@@ -134,12 +132,6 @@ export default function App() {
         perspectiveExpression: 'if("price" >= 105, 1, if("price" >= 95, 2, 3))',
         aggFunc: "trafficLight",
         width: 90,
-        valueFormatter: (p) => {
-          if (p.value === 1) return "🟢";
-          if (p.value === 2) return "🟡";
-          if (p.value === 3) return "🔴";
-          return typeof p.value === "number" ? String(p.value) : "";
-        },
       },
     ],
     [],
@@ -177,8 +169,8 @@ export default function App() {
       >
         <strong>&lt;SSRMGrid&gt;</strong>
         <span style={{ color: "#9aa4b0" }}>
-          AG Grid Enterprise (SSRM) · Perspective · {ROW_COUNT.toLocaleString()}{" "}
-          × {colCount} cols, all ticking
+          AG Grid SSRM · grouped by book · {ROW_COUNT.toLocaleString()} ×{" "}
+          {colCount} cols · ticks update leaf + group aggs
         </span>
         <input
           type="search"
@@ -259,6 +251,7 @@ export default function App() {
             "cusip",
           ]}
           enableCharts
+          enableCellChangeFlash
           grandTotalRow="bottom"
           groupTotalRow="bottom"
         />

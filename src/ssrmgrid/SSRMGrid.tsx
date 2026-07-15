@@ -8,20 +8,21 @@ import {
   useState,
 } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type {
-  CellValueChangedEvent,
-  ChartType,
-  ColDef,
-  DefaultMenuItem,
-  GetContextMenuItemsParams,
-  GetDetailRowDataParams,
-  GetRowIdParams,
-  GridApi,
-  GridReadyEvent,
-  IServerSideGroupSelectionState,
-  IServerSideSelectionState,
-  MenuItemDef,
-  Theme,
+import {
+  GRAND_TOTAL_ROW_ID,
+  type CellValueChangedEvent,
+  type ChartType,
+  type ColDef,
+  type DefaultMenuItem,
+  type GetContextMenuItemsParams,
+  type GetDetailRowDataParams,
+  type GetRowIdParams,
+  type GridApi,
+  type GridReadyEvent,
+  type IServerSideGroupSelectionState,
+  type IServerSideSelectionState,
+  type MenuItemDef,
+  type Theme,
 } from "ag-grid-community";
 import "../agGrid/modules";
 import { theme as defaultTheme } from "../agGrid/theme";
@@ -44,6 +45,10 @@ import {
   MirrorLoadingCellRenderer,
   setActiveRowMirror,
 } from "../ssrm/mirrorLoadingCell";
+import {
+  patchGrandTotalFromMirror,
+  patchLoadedGroupAggregatesFromMirror,
+} from "../ssrm/patchLoadedGroupAggregates";
 import { SsrmBlockCache } from "../ssrm/ssrmBlockCache";
 import type { FeedConfig } from "../ssrm/types";
 import { createWorkerClient } from "../ssrm/workerClient";
@@ -333,6 +338,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const typingQuietRef = useRef(false);
     /** Epoch ms — suppress tick refresh until after a filter purge settles. */
     const tickQuietUntilRef = useRef(0);
+    /** Throttle group-header agg patches under high-frequency ticks. */
+    const groupAggPatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+      null,
+    );
     /** Bumped on every purge refresh; datasource drops older-generation blocks. */
     const refreshGenerationRef = useRef(0);
     /**
@@ -604,6 +613,42 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     useEffect(() => {
       const client = createWorkerClient();
       clientRef.current = client;
+
+      const scheduleLiveAggPatch = (api: GridApi) => {
+        const grouped = (api.getRowGroupColumns?.() ?? []).length > 0;
+        const nativeGrand = usesNativeGrandTotal(grandTotalRowRef.current);
+        if (!grouped && !nativeGrand) return;
+        if (groupAggPatchTimerRef.current != null) return;
+        const run = () => {
+          groupAggPatchTimerRef.current = null;
+          const quietLeft = tickQuietUntilRef.current - Date.now();
+          if (quietLeft > 0) {
+            groupAggPatchTimerRef.current = window.setTimeout(run, quietLeft);
+            return;
+          }
+          const extras = {
+            quickFilterText: quickFilterRef.current || undefined,
+            quickFilterFields: quickFilterFieldsRef.current,
+            absSort: absSortRef.current || undefined,
+            rowKeepExpression: rowKeepExpressionRef.current || undefined,
+            idField,
+          };
+          // Native grandTotalRow is sticky after first getRows — patch via
+          // GRAND_TOTAL_ROW_ID transaction so ticks move the footer.
+          if (usesNativeGrandTotal(grandTotalRowRef.current)) {
+            patchGrandTotalFromMirror(api, rowMirrorRef.current, extras);
+          }
+          if ((api.getRowGroupColumns?.() ?? []).length > 0) {
+            patchLoadedGroupAggregatesFromMirror(
+              api,
+              rowMirrorRef.current,
+              extras,
+            );
+          }
+        };
+        groupAggPatchTimerRef.current = window.setTimeout(run, 100);
+      };
+
       client.setDirtyHandler((msg) => {
         onDirtyRef.current?.(msg);
         // configureAndLoad owns the first refresh after setRowData; applying a
@@ -613,54 +658,80 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         if (!configuredRef.current || ingestingRef.current) return;
         const api = apiRef.current;
         if (!api) return;
+        // Pivot cells are worker aggregates (not leaf row ids). Surgical txs
+        // were a non-pivot optimization; in pivot mode fall back to the old
+        // Perspective soft-refresh path so pivoted values keep ticking.
+        const pivotMode = Boolean(api.isPivotMode?.());
         const mode = applyWorkerDirtyToGrid(msg, {
-          applyLeafTransaction: (leaf) => {
-            // In-place SSRM patch — avoids soft-refreshing every loaded block
-            // on each tick. AG Grid batches via asyncTransactionWaitMillis.
-            // SSRM `update` replaces row.data — merge partial patches first or
-            // Book/Trader/etc. blank out (ticks only send changed fields).
-            if (leaf.update?.length) {
-              // Always keep mirror + block cache current (stub paint / sync getRows).
-              const fromMirror = rowMirrorRef.current.patchById(leaf.update);
-              blockCacheRef.current.patchRows(idField, leaf.update);
-              // While the user is scrolling, skip AG Grid txs — they fight the
-              // scroll pipeline and blank cells mid-drag.
-              if (Date.now() < tickQuietUntilRef.current) return;
-              const update = mergeLeafUpdateRows(
-                idField,
-                leaf.update,
-                (id) =>
-                  rowMirrorRef.current.findById(id) ??
-                  blockCacheRef.current.findRow(idField, id) ??
-                  (api.getRowNode(id)?.data as
-                    | Record<string, unknown>
-                    | undefined),
-              );
-              api.applyServerSideTransactionAsync({
-                update: update.length ? update : fromMirror,
-                ...(leaf.add?.length ? { add: leaf.add } : {}),
-              });
-            } else if (leaf.add?.length) {
-              rowMirrorRef.current.patchById(leaf.add);
-              blockCacheRef.current.clear();
-              if (Date.now() < tickQuietUntilRef.current) return;
-              api.applyServerSideTransactionAsync({ add: leaf.add });
+          applyLeafTransaction: pivotMode
+            ? undefined
+            : (leaf) => {
+                // In-place SSRM patch — avoids soft-refreshing every loaded block
+                // on each tick. AG Grid batches via asyncTransactionWaitMillis.
+                // SSRM `update` replaces row.data — merge partial patches first or
+                // Book/Trader/etc. blank out (ticks only send changed fields).
+                if (leaf.update?.length) {
+                  // Always keep mirror + block cache current (stub paint / sync getRows).
+                  const fromMirror = rowMirrorRef.current.patchById(leaf.update);
+                  blockCacheRef.current.patchRows(idField, leaf.update);
+                  // While the user is scrolling, skip AG Grid txs — they fight the
+                  // scroll pipeline and blank cells mid-drag. Still schedule a
+                  // group-agg flush for after the quiet window.
+                  scheduleLiveAggPatch(api);
+                  if (Date.now() < tickQuietUntilRef.current) return;
+                  const update = mergeLeafUpdateRows(
+                    idField,
+                    leaf.update,
+                    (id) =>
+                      rowMirrorRef.current.findById(id) ??
+                      blockCacheRef.current.findRow(idField, id) ??
+                      (api.getRowNode(id)?.data as
+                        | Record<string, unknown>
+                        | undefined),
+                  );
+                  api.applyServerSideTransactionAsync({
+                    update: update.length ? update : fromMirror,
+                    ...(leaf.add?.length ? { add: leaf.add } : {}),
+                  });
+                } else if (leaf.add?.length) {
+                  rowMirrorRef.current.patchById(leaf.add);
+                  blockCacheRef.current.clear();
+                  scheduleLiveAggPatch(api);
+                  if (Date.now() < tickQuietUntilRef.current) return;
+                  api.applyServerSideTransactionAsync({ add: leaf.add });
+                }
+              },
+          throttleRefresh: () => {
+            // Keep mirror in sync even when we soft-refresh (pivot / no surgical).
+            const tx = msg.transaction;
+            if (tx?.update?.length) {
+              rowMirrorRef.current.patchById(tx.update);
+              blockCacheRef.current.patchRows(idField, tx.update);
             }
+            if (tx?.add?.length) {
+              rowMirrorRef.current.patchById(tx.add);
+              blockCacheRef.current.clear();
+            }
+            throttleRef.current?.();
           },
-          throttleRefresh: () => throttleRef.current?.(),
           purgeRefresh: () =>
             purgeRefreshStoresRef.current({ bumpGeneration: false }),
         });
         // Purge path already refreshes totals inside purgeRefreshStores.
-        // Surgical ticks: refresh totals only when not scrolling (worker is
-        // serial — totals queries steal bandwidth from block loads).
+        // Surgical / soft-refresh ticks: refresh totals only when not scrolling
+        // (worker is serial — totals queries steal bandwidth from block loads).
         if (mode === "surgical") {
           if (Date.now() >= tickQuietUntilRef.current) {
             void refreshTotalsRef.current();
           }
         }
       });
+
       return () => {
+        if (groupAggPatchTimerRef.current != null) {
+          window.clearTimeout(groupAggPatchTimerRef.current);
+          groupAggPatchTimerRef.current = null;
+        }
         client.dispose();
         clientRef.current = null;
         configuredRef.current = false;
@@ -968,6 +1039,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       (params: GetRowIdParams) => {
         const data = params.data as Record<string, unknown> | undefined;
         if (!data) return crypto.randomUUID();
+        // Native grand total footer updates via applyServerSideTransaction.
+        if (data[idField] === GRAND_TOTAL_ROW_ID) {
+          return GRAND_TOTAL_ROW_ID;
+        }
         // Tree data row (from the tree shaper).
         if (treeData && data.__treeKey != null) {
           const route = [...(params.parentKeys ?? []), String(data.__treeKey)].join("|");
@@ -1142,8 +1217,14 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     );
 
     const onStructureChanged = useCallback(() => {
-      purgeRefreshStores();
-    }, [purgeRefreshStores]);
+      // AG Grid SSRM already tears down stores and re-issues getRows when the
+      // row-group / pivot panels change. purgeRefreshStores() here double-loads
+      // (Loading overlay + refreshGeneration abort) and is what makes "add a
+      // group field" feel stuck. Only drop caches so the next getRows is fresh.
+      blockCacheRef.current.clear();
+      rowMirrorRef.current.invalidateView();
+      tickQuietUntilRef.current = Date.now() + 300;
+    }, []);
 
     const hostRef = useRef<HTMLDivElement | null>(null);
 

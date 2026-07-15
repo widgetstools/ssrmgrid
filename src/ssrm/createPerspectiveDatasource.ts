@@ -202,6 +202,7 @@ export function createPerspectiveDatasource(
           pivotMode: keyParts.pivotMode,
           filterModel: keyParts.filterModel,
           sortModel: keyParts.sortModel,
+          valueCols,
           quickFilterText: extras.quickFilterText,
           quickFilterFields: extras.quickFilterFields,
           treeData: extras.treeData,
@@ -212,6 +213,13 @@ export function createPerspectiveDatasource(
           const cached: CachedGetRows = {
             rowData: mirrored.rowData,
             rowCount: mirrored.rowCount,
+            ...(mirrored.totals ? { totals: mirrored.totals } : {}),
+            ...(mirrored.aggregates
+              ? { aggregates: mirrored.aggregates }
+              : {}),
+            ...(mirrored.filteredRowCount != null
+              ? { filteredRowCount: mirrored.filteredRowCount }
+              : {}),
           };
           if (blockCache) blockCache.set(cacheKey, cached);
           deliver(cached);

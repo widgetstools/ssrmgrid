@@ -91,20 +91,31 @@ describe("RowMirror", () => {
     expect(slice?.rowData.map((r) => r.id)).toEqual(["3", "1"]);
   });
 
-  it("returns null for group header requests", () => {
+  it("serves group header rows with aggregates synchronously", () => {
     const mirror = new RowMirror();
-    mirror.replaceAll([{ id: "1", book: "A" }], "id");
-    expect(
-      mirror.tryGetRows({
-        startRow: 0,
-        endRow: 100,
-        rowGroupCols: [{ id: "book", field: "book" }],
-        groupKeys: [],
-        pivotMode: false,
-        filterModel: {},
-        sortModel: [],
-      }),
-    ).toBeNull();
+    mirror.replaceAll(
+      [
+        { id: "1", book: "A", pnl: 10 },
+        { id: "2", book: "B", pnl: 5 },
+        { id: "3", book: "A", pnl: 30 },
+      ],
+      "id",
+    );
+    const slice = mirror.tryGetRows({
+      startRow: 0,
+      endRow: 100,
+      rowGroupCols: [{ id: "book", field: "book" }],
+      groupKeys: [],
+      pivotMode: false,
+      filterModel: {},
+      sortModel: [],
+      valueCols: [{ id: "pnl", field: "pnl", aggFunc: "sum" }],
+    });
+    expect(slice?.rowCount).toBe(2);
+    const a = slice?.rowData.find((r) => r.__ssrmGroupKey === "A");
+    expect(a).toMatchObject({ book: "A", childCount: 2, pnl: 40 });
+    // Grand totals roll every matching leaf (A + B).
+    expect(slice?.totals?.pnl).toBe(45);
   });
 
   it("serves leaf store under a group key", () => {

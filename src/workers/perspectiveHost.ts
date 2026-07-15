@@ -388,7 +388,14 @@ export function createPerspectiveHost(
 
       const attachFilteredAggregates = async (
         result: SsrmGetRowsResult,
+        opts?: { force?: boolean },
       ): Promise<SsrmGetRowsResult> => {
+        // Nested group/leaf block fetches pay a full second aggregate query.
+        // Skip unless forced — root pages still attach for share-of-total /
+        // grandTotal; SSRMGrid refreshTotals covers status-bar sums.
+        const nestedUnderGroups = (request.groupKeys?.length ?? 0) > 0;
+        if (nestedUnderGroups && !opts?.force) return result;
+
         const specs = collectAggregateSpecs(request);
         if (specs.length === 0) return result;
         try {
