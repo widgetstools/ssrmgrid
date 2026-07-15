@@ -11,21 +11,26 @@ import { AgGridReact } from "ag-grid-react";
 import type { CustomStatusPanelProps } from "ag-grid-react";
 import type {
   CellValueChangedEvent,
+  ChartType,
   ColDef,
   DefaultMenuItem,
   GetContextMenuItemsParams,
   GetDetailRowDataParams,
   GetRowIdParams,
   GridApi,
+  IServerSideGroupSelectionState,
+  IServerSideSelectionState,
   MenuItemDef,
+  Theme,
 } from "ag-grid-community";
 import "../agGrid/modules";
-import { theme } from "../agGrid/theme";
+import { theme as defaultTheme } from "../agGrid/theme";
 import {
   createPerspectiveDatasource,
   throttle,
 } from "../ssrm/createPerspectiveDatasource";
 import { getActiveFilterModel } from "../ssrm/activeFilterModel";
+import { chartAllViaAgGrid } from "../ssrm/chartAllViaAgGrid";
 import { exportAllViaAgGrid } from "../ssrm/exportAllViaAgGrid";
 import { refreshAllLoadedServerSideStores } from "../ssrm/refreshAllLoadedStores";
 import type { FeedConfig } from "../ssrm/types";
@@ -34,6 +39,36 @@ import { PIVOT_FIELD_SEPARATOR } from "../workers/ssrmQueryEngine";
 import { buildColumnOverride, type SSRMColDef } from "./columnOverride";
 
 const DATASET = "main";
+
+export type GrandTotalRowMode =
+  | boolean
+  | "top"
+  | "bottom"
+  | "pinnedTop"
+  | "pinnedBottom";
+
+export type GroupTotalRowMode = "top" | "bottom";
+
+function resolveGrandTotalRow(
+  mode: GrandTotalRowMode | undefined,
+): "top" | "bottom" | "pinnedTop" | "pinnedBottom" | undefined {
+  if (mode === true) return "pinnedBottom";
+  if (mode === false || mode == null) return undefined;
+  return mode;
+}
+
+/** Use AG Grid 36 native grandTotalData (not a React pinned-row workaround). */
+function usesNativeGrandTotal(
+  mode: GrandTotalRowMode | undefined,
+): boolean {
+  const resolved = resolveGrandTotalRow(mode);
+  return (
+    resolved === "top" ||
+    resolved === "bottom" ||
+    resolved === "pinnedTop" ||
+    resolved === "pinnedBottom"
+  );
+}
 
 /**
  * Total (filtered) leaf-row count for the SSRM status bar. AG Grid's built-in
@@ -107,6 +142,22 @@ export interface SSRMGridHandle {
   applyTransactionAsync(tx: SSRMTransaction): void;
   /** The underlying ag-grid GridApi (escape hatch). */
   getApi(): GridApi | null;
+  /** AG Grid 36 SSRM selection state (select-all across unloaded rows). */
+  getServerSideSelectionState():
+    | IServerSideSelectionState
+    | IServerSideGroupSelectionState
+    | null;
+  setServerSideSelectionState(
+    state: IServerSideSelectionState | IServerSideGroupSelectionState,
+  ): void;
+  /**
+   * Chart the full filtered set (Perspective getSeriesData), not just loaded
+   * SSRM blocks. Requires `enableCharts`.
+   */
+  chartFilteredData(opts?: {
+    categoryField?: string;
+    chartType?: ChartType;
+  }): Promise<{ rowCount: number; chartId?: string } | null>;
 }
 
 export interface SSRMGridProps {
@@ -124,10 +175,23 @@ export interface SSRMGridProps {
   onTotals?: (summary: string) => void;
   /** Grid host height (default 100%). */
   height?: string | number;
+  /**
+   * AG Grid theme. When omitted, uses ssrmgrid's built-in dark Quartz theme.
+   * Host apps (e.g. MarketsGrid) should pass their design-system theme so SSRM
+   * chrome matches CSRM.
+   */
+  theme?: Theme;
+  /** Load Google Fonts referenced by the active theme (default: only for built-in theme). */
+  loadThemeGoogleFonts?: boolean;
 
   // ---- gap-closing options (all off/absent by default) -------------------
   /** Server-side quick filter (global search across text columns). */
   quickFilterText?: string;
+  /**
+   * Restrict quick filter to these string fields. Default: all non-PK string
+   * columns from the schema.
+   */
+  quickFilterFields?: string[];
   /** Enable server-side pagination. */
   pagination?: boolean;
   paginationPageSize?: number;
@@ -138,14 +202,36 @@ export interface SSRMGridProps {
   /** Pinned rows (passthrough — client-set, independent of the row model). */
   pinnedTopRowData?: Record<string, unknown>[];
   pinnedBottomRowData?: Record<string, unknown>[];
-  /** Integrated Charts on the selected range. */
+  /** Integrated Charts on the selected range (+ full-set chart via context menu). */
   enableCharts?: boolean;
-  /** Show a grand-total pinned bottom row (filtered aggregates). */
-  grandTotalRow?: boolean;
-  /** Master/detail: expandable detail grid per master row. */
+  /**
+   * AG Grid 36 grand total row. `true` ≡ `'pinnedBottom'`. Uses native
+   * `grandTotalData` from the SSRM datasource (not a manual pinned row).
+   */
+  grandTotalRow?: GrandTotalRowMode;
+  /**
+   * AG Grid 36 group footer rows (`'top' | 'bottom'`). Aggregates already come
+   * from Perspective on group rows.
+   */
+  groupTotalRow?: GroupTotalRowMode;
+  /**
+   * Master/detail: expandable detail grid per master row.
+   * Provide either `getDetailRowData` (consumer fetch) or `matchFields`
+   * (Perspective worker equality filter on `detailDataset`, default main).
+   */
   masterDetail?: {
     detailColumnDefs: ColDef[];
-    getDetailRowData: (masterRow: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    getDetailRowData?: (
+      masterRow: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>[]>;
+    /**
+     * Worker-backed join: detail-field → master-field. Example:
+     * `{ book: "book", trader: "trader" }`.
+     */
+    matchFields?: Record<string, string>;
+    /** Dataset for worker detail fetch (default: main). */
+    detailDataset?: string;
+    detailLimit?: number;
     isRowMaster?: (row: Record<string, unknown>) => boolean;
   };
   /** Tree data: hierarchy fields (outer -> inner); leaf rows drill under them. */
@@ -184,13 +270,17 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const apiRef = useRef<GridApi | null>(null);
     const clientRef = useRef<ReturnType<typeof createWorkerClient> | null>(null);
     const throttleRef = useRef<(() => void) | null>(null);
+    /** While true, tick-driven throttled refresh is suppressed (typing / post-filter). */
+    const typingQuietRef = useRef(false);
+    /** Epoch ms — suppress tick refresh until after a filter purge settles. */
+    const tickQuietUntilRef = useRef(0);
+    /** Bumped on every purge refresh; datasource drops older-generation blocks. */
+    const refreshGenerationRef = useRef(0);
     const gridReadyRef = useRef(false);
     const configuredRef = useRef(false);
     const asyncBufferRef = useRef<SSRMTransaction | null>(null);
     const [, forceRerender] = useState(0);
-    // Grand-total pinned bottom row (managed via state so React doesn't clobber
-    // it — a static pinnedBottomRowData prop would reset an imperative set).
-    const [grandTotalData, setGrandTotalData] = useState<Record<string, unknown>[] | undefined>();
+    const grandTotalRowOpt = resolveGrandTotalRow(props.grandTotalRow);
 
     // Distinct values for set filters -> Perspective, server-side.
     const getFilterValues = useCallback(
@@ -249,11 +339,17 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     // Live extras threaded into every getRows request (read at call time).
     const quickFilterRef = useRef(props.quickFilterText ?? "");
     quickFilterRef.current = props.quickFilterText ?? "";
+    const quickFilterFieldsRef = useRef(props.quickFilterFields);
+    quickFilterFieldsRef.current = props.quickFilterFields;
     const absSortRef = useRef(props.absSort ?? false);
     absSortRef.current = props.absSort ?? false;
     // Cached unfiltered total — only changes when the dataset changes (add/
     // remove), never on filter, so filter changes reuse it instead of re-querying.
     const totalRowCountRef = useRef<number | null>(null);
+    const onTotalsPropRef = useRef(props.onTotals);
+    onTotalsPropRef.current = props.onTotals;
+    const grandTotalRowRef = useRef(props.grandTotalRow);
+    grandTotalRowRef.current = props.grandTotalRow;
 
     const refreshTotals = useCallback(
       async (opts?: { refetchTotal?: boolean }) => {
@@ -262,6 +358,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         if (!client || !api) return;
         const filterModel = getActiveFilterModel(api);
         const quickFilter = quickFilterRef.current || undefined;
+        const quickFilterFields = quickFilterFieldsRef.current;
         const isFiltered =
           Object.keys(filterModel).length > 0 || Boolean(quickFilter);
         // Resolve row counts for the status bar via Perspective. Uses NO value
@@ -285,6 +382,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
                   valueCols: [],
                   filterModel,
                   quickFilterText: quickFilter,
+                  quickFilterFields,
                 })
               ).rowCount
             : total;
@@ -311,6 +409,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             valueCols,
             filterModel,
             quickFilterText: quickFilter,
+            quickFilterFields,
           });
           api.setGridOption("context", {
             ...(api.getGridOption("context") as object | undefined),
@@ -318,23 +417,40 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             aggregates: result.aggregates,
             filteredRowCount: result.rowCount,
           });
-          props.onTotals?.(
+          onTotalsPropRef.current?.(
             `Σ ${result.rowCount.toLocaleString()} rows · ${formatTotals(result.totals)}`,
           );
-          // Grand-total pinned bottom row (filtered aggregates), if requested.
-          if (props.grandTotalRow) {
-            const totalRow: Record<string, unknown> = { __ssrmGrandTotal: true };
-            for (const vc of valueCols) {
-              totalRow[vc.field] = result.aggregates[vc.field]?.[vc.aggFunc];
-            }
-            api.setGridOption("pinnedBottomRowData", [totalRow]);
-          }
+          // Native AG Grid 36 grandTotalRow is fed via datasource grandTotalData;
+          // refreshTotals only updates context / onTotals.
         } catch {
           /* ignore transient totals failures */
         }
       },
-      [props],
+      [],
     );
+
+    const purgeRefreshStores = useCallback(
+      (opts?: {
+        refetchTotal?: boolean;
+        quietTicksMs?: number;
+        bumpGeneration?: boolean;
+      }) => {
+        const api = apiRef.current;
+        if (!api) return;
+        if (opts?.bumpGeneration !== false) {
+          refreshGenerationRef.current += 1;
+        }
+        refreshAllLoadedServerSideStores(api, { purge: true });
+        void refreshTotals(opts);
+        if (opts?.quietTicksMs != null && opts.quietTicksMs > 0) {
+          tickQuietUntilRef.current = Date.now() + opts.quietTicksMs;
+        }
+      },
+      [refreshTotals],
+    );
+
+    const purgeRefreshStoresRef = useRef(purgeRefreshStores);
+    purgeRefreshStoresRef.current = purgeRefreshStores;
 
     const datasource = useMemo(
       () =>
@@ -343,8 +459,11 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           () => DATASET,
           () => ({
             quickFilterText: quickFilterRef.current || undefined,
+            quickFilterFields: quickFilterFieldsRef.current,
             treeData: treeData || undefined,
             absSort: absSortRef.current || undefined,
+            refreshGeneration: refreshGenerationRef.current,
+            includeGrandTotal: usesNativeGrandTotal(grandTotalRowRef.current),
           }),
           (totals, filteredRowCount, aggregates) => {
             const api = apiRef.current;
@@ -355,25 +474,13 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
                 aggregates,
                 filteredRowCount,
               });
-              // Grand-total pinned bottom row: use each measure's own aggFunc
-              // value (aggregates), falling back to the sum in `totals`.
-              if (props.grandTotalRow) {
-                const row: Record<string, unknown> = { __ssrmGrandTotal: true };
-                for (const c of columnDefs) {
-                  const f = c.field;
-                  if (!f || !c.aggFunc) continue;
-                  const byFn = aggregates?.[f] as Record<string, unknown> | undefined;
-                  row[f] = byFn?.[String(c.aggFunc)] ?? totals[f];
-                }
-                setGrandTotalData([row]);
-              }
             }
-            props.onTotals?.(
+            onTotalsPropRef.current?.(
               `Σ ${filteredRowCount.toLocaleString()} rows · ${formatTotals(totals)}`,
             );
           },
         ),
-      [props],
+      [treeData],
     );
 
     // Boot the worker client once.
@@ -390,6 +497,8 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     // (Re)build the throttled refresh when the throttle changes.
     useEffect(() => {
       throttleRef.current = throttle(() => {
+        if (typingQuietRef.current) return;
+        if (Date.now() < tickQuietUntilRef.current) return;
         if (apiRef.current) {
           refreshAllLoadedServerSideStores(apiRef.current, { purge: false });
         }
@@ -407,10 +516,9 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       }
       configuredRef.current = true;
       if (gridReadyRef.current && apiRef.current) {
-        refreshAllLoadedServerSideStores(apiRef.current, { purge: true });
-        void refreshTotals();
+        purgeRefreshStores({ bumpGeneration: false });
       }
-    }, [refreshTotals]);
+    }, [purgeRefreshStores]);
 
     // Re-configure when the schema/config changes.
     useEffect(() => {
@@ -419,18 +527,32 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     }, [feedConfig]);
 
     // Quick filter / abs sort changes: server-side re-query (debounced).
-    // The unfiltered total is unchanged by filtering, so it isn't re-queried
-    // (refetchTotal:false) — only the filtered count and the rows are refreshed.
+    const appliedQuickFilterRef = useRef(props.quickFilterText ?? "");
+    const appliedAbsSortRef = useRef(props.absSort ?? false);
     useEffect(() => {
       if (!gridReadyRef.current || !apiRef.current) return;
+      const quick = props.quickFilterText ?? "";
+      const abs = props.absSort ?? false;
+      if (
+        quick === appliedQuickFilterRef.current &&
+        abs === appliedAbsSortRef.current
+      ) {
+        return;
+      }
+      typingQuietRef.current = true;
       const h = window.setTimeout(() => {
-        if (apiRef.current) {
-          refreshAllLoadedServerSideStores(apiRef.current, { purge: true });
-          void refreshTotals({ refetchTotal: false });
-        }
-      }, 120);
-      return () => window.clearTimeout(h);
-    }, [props.quickFilterText, props.absSort, refreshTotals]);
+        appliedQuickFilterRef.current = quick;
+        appliedAbsSortRef.current = abs;
+        purgeRefreshStoresRef.current({
+          refetchTotal: false,
+          quietTicksMs: 400,
+        });
+        typingQuietRef.current = false;
+      }, 200);
+      return () => {
+        window.clearTimeout(h);
+      };
+    }, [props.quickFilterText, props.absSort]);
 
     // Push a new rowData snapshot when it changes after configure.
     const firstRowData = useRef(true);
@@ -443,11 +565,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       if (!client || !configuredRef.current) return;
       void client.setRowData(DATASET, rowData ?? []).then(() => {
         if (apiRef.current) {
-          refreshAllLoadedServerSideStores(apiRef.current, { purge: true });
-          void refreshTotals();
+          purgeRefreshStores();
         }
       });
-    }, [rowData, refreshTotals]);
+    }, [rowData, purgeRefreshStores]);
 
     // Normalize a transaction's `remove` to id list (id field or object).
     const removeIds = useCallback(
@@ -479,6 +600,24 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       [removeIds, refreshTotals],
     );
 
+    const handleChartAll = useCallback(
+      async (opts?: { categoryField?: string; chartType?: ChartType }) => {
+        const client = clientRef.current;
+        const api = apiRef.current;
+        if (!client || !api || !props.enableCharts) return null;
+        return chartAllViaAgGrid({
+          liveApi: api,
+          client,
+          dataset: DATASET,
+          categoryField: opts?.categoryField,
+          chartType: opts?.chartType,
+          quickFilterText: quickFilterRef.current || undefined,
+          quickFilterFields: quickFilterFieldsRef.current,
+        });
+      },
+      [props.enableCharts],
+    );
+
     useImperativeHandle(
       ref,
       (): SSRMGridHandle => ({
@@ -499,8 +638,14 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           }
         },
         getApi: () => apiRef.current,
+        getServerSideSelectionState: () =>
+          apiRef.current?.getServerSideSelectionState() ?? null,
+        setServerSideSelectionState: (state) => {
+          apiRef.current?.setServerSideSelectionState(state);
+        },
+        chartFilteredData: (opts) => handleChartAll(opts),
       }),
-      [commit],
+      [commit, handleChartAll],
     );
 
     const getRowIdCb = useCallback(
@@ -530,29 +675,52 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const md = props.masterDetail;
     const isRowMaster = useCallback(
       (data: Record<string, unknown> | undefined) => {
-        if (!md || !data || typeof data.childCount === "number" || data.group === true) return false;
+        if (!md || !data || typeof data.childCount === "number" || data.group === true) {
+          return false;
+        }
         return md.isRowMaster ? md.isRowMaster(data) : true;
       },
       [md],
     );
-    const detailCellRendererParams = useMemo(
-      () =>
-        md
-          ? {
-              detailGridOptions: {
-                columnDefs: md.detailColumnDefs,
-                defaultColDef: { flex: 1, minWidth: 90 },
-              },
-              getDetailRowData: (p: GetDetailRowDataParams<Record<string, unknown>>) => {
-                void md
-                  .getDetailRowData(p.data)
-                  .then((rows) => p.successCallback(rows))
-                  .catch(() => p.successCallback([]));
-              },
-            }
-          : undefined,
-      [md],
-    );
+    const detailCellRendererParams = useMemo(() => {
+      if (!md) return undefined;
+      const fetchDetail = async (
+        master: Record<string, unknown>,
+      ): Promise<Record<string, unknown>[]> => {
+        if (md.getDetailRowData) {
+          return md.getDetailRowData(master);
+        }
+        if (md.matchFields && Object.keys(md.matchFields).length > 0) {
+          const match: Record<string, string | number | boolean | null> = {};
+          for (const [detailField, masterField] of Object.entries(md.matchFields)) {
+            const v = master[masterField];
+            match[detailField] =
+              v === undefined
+                ? null
+                : (v as string | number | boolean | null);
+          }
+          const client = clientRef.current;
+          if (!client) return [];
+          return client.getDetailRows({
+            dataset: md.detailDataset ?? DATASET,
+            match,
+            limit: md.detailLimit ?? 500,
+          });
+        }
+        return [];
+      };
+      return {
+        detailGridOptions: {
+          columnDefs: md.detailColumnDefs,
+          defaultColDef: { flex: 1, minWidth: 90 },
+        },
+        getDetailRowData: (p: GetDetailRowDataParams<Record<string, unknown>>) => {
+          void fetchDetail(p.data)
+            .then((rows) => p.successCallback(rows))
+            .catch(() => p.successCallback([]));
+        },
+      };
+    }, [md]);
 
     // ---- Tree data ---------------------------------------------------------
     const isServerSideGroup = useCallback(
@@ -578,6 +746,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           fileName: `export-all.${format === "excel" ? "xlsx" : "csv"}`,
           limit: 100_000,
           quickFilterText: quickFilterRef.current,
+          quickFilterFields: quickFilterFieldsRef.current,
           treeData,
           absSort: absSortRef.current,
         });
@@ -585,25 +754,48 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       [treeData],
     );
     const getContextMenuItems = useCallback(
-      (params: GetContextMenuItemsParams): (DefaultMenuItem | MenuItemDef)[] =>
-        (params.defaultItems ?? []).flatMap((item): (DefaultMenuItem | MenuItemDef)[] => {
-          if (item === "csvExport")
-            return [{ name: "CSV export (all filtered rows)", action: () => void handleExportAll("csv") }];
-          if (item === "excelExport")
-            return [{ name: "Excel export (all filtered rows)", action: () => void handleExportAll("excel") }];
-          if (item === "export")
-            return [
-              {
-                name: "Export (all filtered rows)",
-                subMenu: [
-                  { name: "CSV", action: () => void handleExportAll("csv") },
-                  { name: "Excel", action: () => void handleExportAll("excel") },
-                ],
-              },
-            ];
-          return [item];
-        }),
-      [handleExportAll],
+      (params: GetContextMenuItemsParams): (DefaultMenuItem | MenuItemDef)[] => {
+        const items = (params.defaultItems ?? []).flatMap(
+          (item): (DefaultMenuItem | MenuItemDef)[] => {
+            if (item === "csvExport")
+              return [
+                {
+                  name: "CSV export (all filtered rows)",
+                  action: () => void handleExportAll("csv"),
+                },
+              ];
+            if (item === "excelExport")
+              return [
+                {
+                  name: "Excel export (all filtered rows)",
+                  action: () => void handleExportAll("excel"),
+                },
+              ];
+            if (item === "export")
+              return [
+                {
+                  name: "Export (all filtered rows)",
+                  subMenu: [
+                    { name: "CSV", action: () => void handleExportAll("csv") },
+                    {
+                      name: "Excel",
+                      action: () => void handleExportAll("excel"),
+                    },
+                  ],
+                },
+              ];
+            return [item];
+          },
+        );
+        if (props.enableCharts) {
+          items.push({
+            name: "Chart all filtered rows",
+            action: () => void handleChartAll(),
+          });
+        }
+        return items;
+      },
+      [handleExportAll, handleChartAll, props.enableCharts],
     );
 
     const onCellValueChanged = useCallback(
@@ -633,11 +825,8 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     );
 
     const onStructureChanged = useCallback(() => {
-      if (apiRef.current) {
-        refreshAllLoadedServerSideStores(apiRef.current, { purge: true });
-      }
-      void refreshTotals();
-    }, [refreshTotals]);
+      purgeRefreshStores();
+    }, [purgeRefreshStores]);
 
     const defaultColDef = useMemo<ColDef>(
       () => ({
@@ -686,6 +875,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         checkboxes: true,
         headerCheckbox: true,
         enableClickSelection: true,
+        // AG Grid 36 SSRM: only `'all'` is valid (not filtered/currentPage).
+        // Selection spans unloaded blocks via get/setServerSideSelectionState.
+        selectAll: "all" as const,
+        groupSelects: "descendants" as const,
       }),
       [],
     );
@@ -693,11 +886,15 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
 
     void forceRerender;
 
+    const resolvedTheme = props.theme ?? defaultTheme;
+    const loadGoogleFonts =
+      props.loadThemeGoogleFonts ?? props.theme == null;
+
     return (
       <div style={{ height: props.height ?? "100%", width: "100%" }}>
         <AgGridReact
-          theme={theme}
-          loadThemeGoogleFonts
+          theme={resolvedTheme}
+          loadThemeGoogleFonts={loadGoogleFonts}
           columnDefs={override.agGridColumnDefs}
           defaultColDef={defaultColDef}
           autoGroupColumnDef={autoGroupColumnDef}
@@ -717,8 +914,10 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           paginationPageSize={props.paginationPageSize ?? 100}
           enableAdvancedFilter={props.advancedFilter}
           enableCharts={props.enableCharts}
+          grandTotalRow={grandTotalRowOpt}
+          groupTotalRow={props.groupTotalRow}
           pinnedTopRowData={props.pinnedTopRowData}
-          pinnedBottomRowData={props.grandTotalRow ? grandTotalData : props.pinnedBottomRowData}
+          pinnedBottomRowData={props.pinnedBottomRowData}
           treeData={treeData}
           isServerSideGroup={treeData ? isServerSideGroup : undefined}
           getServerSideGroupKey={treeData ? getServerSideGroupKey : undefined}
@@ -742,8 +941,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             gridReadyRef.current = true;
             if (!configuredRef.current) void configureAndLoad();
             else {
-              refreshAllLoadedServerSideStores(e.api, { purge: true });
-              void refreshTotals();
+              purgeRefreshStores({ bumpGeneration: false });
             }
           }}
         />
