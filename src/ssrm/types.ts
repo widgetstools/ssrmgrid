@@ -104,8 +104,11 @@ export interface QueryAllRequest {
   dataset: DatasetId;
   filterModel: Record<string, unknown>;
   sortModel: SsrmSortEntry[];
-  /** Cap rows returned for safety (default 50_000). */
-  limit?: number;
+  /**
+   * Cap rows returned (default 50_000). Pass `null` for uncapped fetch
+   * (Phase 4a group leaf expansion — product decision: no safety cap).
+   */
+  limit?: number | null;
   quickFilterText?: string;
   quickFilterFields?: string[];
   /** When true (default false), include current group/pivot structure. */

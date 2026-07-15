@@ -748,14 +748,17 @@ export function createPerspectiveHost(
     },
 
     async queryAll(request: QueryAllRequest): Promise<QueryAllResult> {
-      const limit = request.limit ?? 50_000;
+      const uncapped = request.limit === null;
+      const limit = uncapped ? undefined : (request.limit ?? 50_000);
       const countField = getCountAggField(request.dataset);
       const includeStructure = Boolean(request.includeStructure);
+      const table = await ensureTable(request.dataset);
+      const endRow = uncapped ? Number(await table.size()) : (limit as number);
       const mapped = mapSsrmRequestToView(
         {
           dataset: request.dataset,
           startRow: 0,
-          endRow: limit,
+          endRow,
           rowGroupCols: includeStructure ? (request.rowGroupCols ?? []) : [],
           valueCols: includeStructure ? (request.valueCols ?? []) : [],
           pivotCols: includeStructure ? (request.pivotCols ?? []) : [],
@@ -771,8 +774,6 @@ export function createPerspectiveHost(
         countField,
         request.dataset,
       );
-
-      const table = await ensureTable(request.dataset);
       const view = await table.view(mapped.viewConfig);
       let structureView: Awaited<ReturnType<Table["view"]>> | null = null;
       try {
@@ -841,7 +842,7 @@ export function createPerspectiveHost(
         rowData = applyClientSort(rowData, mapped.clientSort);
         const rowCount = rowData.length;
         return {
-          rowData: rowData.slice(0, limit),
+          rowData: limit == null ? rowData : rowData.slice(0, limit),
           rowCount,
           ...(pivotResultFields ? { pivotResultFields } : {}),
         };

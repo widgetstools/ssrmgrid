@@ -44,6 +44,7 @@ import {
   projectRowsForSchema,
   schemaKeysFromFeed,
 } from "../ssrm/ingestRows";
+import { fetchAllGroupLeafRows, toGroupLeafCols } from "../ssrm/getGroupLeafRows";
 import { PIVOT_FIELD_SEPARATOR } from "../workers/ssrmQueryEngine";
 import { foldTrafficLight } from "../ssrm/trafficLightAgg";
 import { buildColumnOverride, type SSRMColDef } from "./columnOverride";
@@ -131,6 +132,15 @@ export interface SSRMGridHandle {
    * Used by quick-filter pill badges under SSRM (no forEachNode full book).
    */
   countMatching(filterModel: Record<string, unknown>): Promise<number>;
+  /**
+   * Fetch **all** leaf rows under a row-group path (Phase 4a).
+   * No product row cap — Perspective returns the full matching set.
+   */
+  getGroupLeafRows(opts: {
+    groupKeys: string[];
+    filterModel?: Record<string, unknown>;
+    quickFilterText?: string;
+  }): Promise<Record<string, unknown>[]>;
 }
 
 export interface SSRMGridProps {
@@ -560,6 +570,42 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       [],
     );
 
+    const getGroupLeafRows = useCallback(
+      async (opts: {
+        groupKeys: string[];
+        filterModel?: Record<string, unknown>;
+        quickFilterText?: string;
+      }): Promise<Record<string, unknown>[]> => {
+        const client = clientRef.current;
+        const api = apiRef.current;
+        if (!client || !configuredRef.current) return [];
+        const rowGroupCols = toGroupLeafCols(
+          (api?.getRowGroupColumns() ?? []).map((col) => {
+            const def = col.getColDef();
+            return {
+              field: def.field ?? col.getColId(),
+              id: col.getColId(),
+              displayName: def.headerName,
+            };
+          }),
+        );
+        const filterModel =
+          opts.filterModel ??
+          (api ? ((api.getFilterModel() as Record<string, unknown>) ?? {}) : {});
+        const quickFilterText =
+          opts.quickFilterText ?? (quickFilterRef.current || undefined);
+        return fetchAllGroupLeafRows((req) => client.queryAll(req), {
+          dataset: DATASET,
+          rowGroupCols,
+          groupKeys: opts.groupKeys,
+          filterModel,
+          quickFilterText,
+          quickFilterFields: quickFilterFieldsRef.current,
+        });
+      },
+      [],
+    );
+
     // Configure the dataset (schema/index) + load the initial snapshot.
     // Generation token drops superseded runs when sampleRow arrives mid-flight
     // (cold mount often starts with rowData=[] then jumps to the full book).
@@ -764,8 +810,9 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         },
         chartFilteredData: (opts) => handleChartAll(opts),
         countMatching,
+        getGroupLeafRows,
       }),
-      [commit, handleChartAll, countMatching],
+      [commit, handleChartAll, countMatching, getGroupLeafRows],
     );
 
     const getRowIdCb = useCallback(

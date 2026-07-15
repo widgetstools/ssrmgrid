@@ -17,3 +17,9 @@ export {
   resolveAggregate,
 } from './ssrm/shareOfTotal';
 export { foldTrafficLight, isTrafficLightAgg } from './ssrm/trafficLightAgg';
+export {
+  fetchAllGroupLeafRows,
+  mergeGroupPathIntoFilterModel,
+  toGroupLeafCols,
+} from './ssrm/getGroupLeafRows';
+export type { GroupLeafRowGroupCol } from './ssrm/getGroupLeafRows';
