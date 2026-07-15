@@ -86,6 +86,7 @@ export async function exportAllViaAgGrid(options: {
   fileName?: string;
   limit?: number;
   quickFilterText?: string;
+  quickFilterFields?: string[];
   treeData?: boolean;
   absSort?: boolean;
 }): Promise<{ rowCount: number }> {
@@ -96,6 +97,7 @@ export async function exportAllViaAgGrid(options: {
     format,
     limit = 50_000,
     quickFilterText,
+    quickFilterFields,
     treeData,
     absSort,
   } = options;
@@ -115,6 +117,7 @@ export async function exportAllViaAgGrid(options: {
     sortModel,
     limit,
     quickFilterText,
+    quickFilterFields,
     includeStructure,
     rowGroupCols,
     valueCols,

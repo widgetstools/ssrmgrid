@@ -55,6 +55,8 @@ export interface SsrmGetRowsRequest {
   sortModel: SsrmSortEntry[];
   /** Server-side quick filter (OR contains across text columns). */
   quickFilterText?: string;
+  /** Restrict quick filter to these string fields (default: all non-PK strings). */
+  quickFilterFields?: string[];
   /** Treat groupKeys as a tree path over hierarchy fields. */
   treeData?: boolean;
   /** Absolute-value sort for numeric measure columns. */
@@ -86,6 +88,8 @@ export interface AggregateRequest {
   valueCols: { id: string; field: string; aggFunc: string }[];
   filterModel: Record<string, unknown>;
   quickFilterText?: string;
+  /** Restrict quick filter to these string fields (default: all non-PK strings). */
+  quickFilterFields?: string[];
 }
 
 export interface AggregateResult {
@@ -103,6 +107,7 @@ export interface QueryAllRequest {
   /** Cap rows returned for safety (default 50_000). */
   limit?: number;
   quickFilterText?: string;
+  quickFilterFields?: string[];
   /** When true (default false), include current group/pivot structure. */
   includeStructure?: boolean;
   rowGroupCols?: SsrmGetRowsRequest["rowGroupCols"];
@@ -127,6 +132,8 @@ export interface SeriesDataRequest {
   valueCols: { id: string; field: string; aggFunc: string }[];
   filterModel: Record<string, unknown>;
   quickFilterText?: string;
+  /** Restrict quick filter to these string fields (default: all non-PK strings). */
+  quickFilterFields?: string[];
   limit?: number;
 }
 

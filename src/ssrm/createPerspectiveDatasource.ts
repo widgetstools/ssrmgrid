@@ -68,6 +68,8 @@ export function createPerspectiveDatasource(
      * `grandTotalRow` modes).
      */
     includeGrandTotal?: boolean;
+    /** False until configure + initial setRowData finish. */
+    isConfigured?: boolean;
   },
   onTotals?: (
     totals: Record<string, unknown>,
@@ -90,8 +92,20 @@ export function createPerspectiveDatasource(
         field: c.field ?? "",
         aggFunc: c.aggFunc ?? "",
       }));
-      client
-        .getRows({
+
+      const run = async () => {
+        // Cold mounts fire getRows before configure+setRowData. Waiting avoids
+        // a permanent ERR cell from params.fail() on an empty/unindexed table.
+        for (let i = 0; i < 400; i++) {
+          if (getExtras?.().isConfigured) break;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        if (!getExtras?.().isConfigured) {
+          params.fail();
+          return;
+        }
+
+        const result = await client.getRows({
           dataset: getDataset(),
           startRow: req.startRow ?? 0,
           endRow: req.endRow ?? 100,
@@ -117,50 +131,49 @@ export function createPerspectiveDatasource(
           quickFilterFields: extras.quickFilterFields,
           treeData: extras.treeData,
           absSort: extras.absSort,
-        })
-        .then((result) => {
-          const currentGen = getExtras?.().refreshGeneration ?? 0;
-          if (generationAtStart !== currentGen) {
-            // Superseded by a purge refresh. Still settle so AG Grid does not
-            // leave the store stuck on the Loading overlay.
-            params.fail();
-            return;
-          }
-          if (result.totals && onTotals) {
-            onTotals(
-              result.totals,
-              result.filteredRowCount ?? result.rowCount,
-              result.aggregates,
-            );
-          }
-
-          const includeGrandTotal =
-            Boolean(extras.includeGrandTotal) &&
-            // Root store only — nested group stores must not replace the footer.
-            (req.groupKeys?.length ?? 0) === 0 &&
-            (params.needsGrandTotal || Boolean(result.aggregates || result.totals));
-
-          const grandTotalData = includeGrandTotal
-            ? buildGrandTotalData(valueCols, result.aggregates, result.totals)
-            : undefined;
-
-          params.success({
-            rowData: result.rowData,
-            rowCount: result.rowCount,
-            ...(result.pivotResultFields
-              ? { pivotResultFields: result.pivotResultFields }
-              : {}),
-            ...(grandTotalData ? { grandTotalData } : {}),
-          });
-        })
-        .catch(() => {
-          const currentGen = getExtras?.().refreshGeneration ?? 0;
-          if (generationAtStart !== currentGen) {
-            params.fail();
-            return;
-          }
-          params.fail();
         });
+
+        const currentGen = getExtras?.().refreshGeneration ?? 0;
+        if (generationAtStart !== currentGen) {
+          params.fail();
+          return;
+        }
+        if (result.totals && onTotals) {
+          onTotals(
+            result.totals,
+            result.filteredRowCount ?? result.rowCount,
+            result.aggregates,
+          );
+        }
+
+        const includeGrandTotal =
+          Boolean(extras.includeGrandTotal) &&
+          (req.groupKeys?.length ?? 0) === 0 &&
+          (params.needsGrandTotal || Boolean(result.aggregates || result.totals));
+
+        const grandTotalData = includeGrandTotal
+          ? buildGrandTotalData(valueCols, result.aggregates, result.totals)
+          : undefined;
+
+        params.success({
+          rowData: result.rowData,
+          rowCount: result.rowCount,
+          ...(result.pivotResultFields
+            ? { pivotResultFields: result.pivotResultFields }
+            : {}),
+          ...(grandTotalData ? { grandTotalData } : {}),
+        });
+      };
+
+      void run().catch((err) => {
+        const currentGen = getExtras?.().refreshGeneration ?? 0;
+        if (generationAtStart !== currentGen) {
+          params.fail();
+          return;
+        }
+        console.error("[SSRM getRows] failed", err);
+        params.fail();
+      });
     },
   };
 }

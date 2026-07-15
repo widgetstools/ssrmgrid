@@ -39,6 +39,11 @@ import {
 import { refreshAllLoadedServerSideStores } from "../ssrm/refreshAllLoadedStores";
 import type { FeedConfig } from "../ssrm/types";
 import { createWorkerClient } from "../ssrm/workerClient";
+import {
+  chunkRows,
+  projectRowsForSchema,
+  schemaKeysFromFeed,
+} from "../ssrm/ingestRows";
 import { PIVOT_FIELD_SEPARATOR } from "../workers/ssrmQueryEngine";
 import { foldTrafficLight } from "../ssrm/trafficLightAgg";
 import { buildColumnOverride, type SSRMColDef } from "./columnOverride";
@@ -121,6 +126,11 @@ export interface SSRMGridHandle {
     categoryField?: string;
     chartType?: ChartType;
   }): Promise<{ rowCount: number; chartId?: string } | null>;
+  /**
+   * Count leaf rows matching an AG Grid filterModel (Perspective aggregates).
+   * Used by quick-filter pill badges under SSRM (no forEachNode full book).
+   */
+  countMatching(filterModel: Record<string, unknown>): Promise<number>;
 }
 
 export interface SSRMGridProps {
@@ -258,30 +268,47 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
     const refreshGenerationRef = useRef(0);
     const gridReadyRef = useRef(false);
     const configuredRef = useRef(false);
+    /** True while chunked snapshot ingest is in flight — suppress dirty purges. */
+    const ingestingRef = useRef(false);
+    /** True while configureAndLoad is running — prevents onGridReady re-entry. */
+    const configureInFlightRef = useRef(false);
     const asyncBufferRef = useRef<SSRMTransaction | null>(null);
     const [, forceRerender] = useState(0);
     const grandTotalRowOpt = resolveGrandTotalRow(props.grandTotalRow);
 
     // Distinct values for set filters -> Perspective, server-side.
+    // Wait until configure+snapshot finish so we never hand AG Grid an empty
+    // list that would wipe selected set-filter values from quick-filter pills.
     const getFilterValues = useCallback(
-      (field: string): Promise<(string | null)[]> => {
+      async (field: string): Promise<(string | null)[]> => {
+        for (let i = 0; i < 200; i++) {
+          if (configuredRef.current && clientRef.current) break;
+          await new Promise((r) => setTimeout(r, 25));
+        }
         const client = clientRef.current;
-        if (!client) return Promise.resolve([]);
+        if (!client || !configuredRef.current) return [];
         return client.getFilterValues(DATASET, field);
       },
       [],
     );
 
-    // Sample only for type inference — capture once so rowData identity churn
-    // (CSRM-style fresh arrays) does not rebuild schema → reconfigure → wipe.
-    const sampleRowRef = useRef<Record<string, unknown> | undefined>(rowData?.[0]);
-    const [sampleRevision, setSampleRevision] = useState(0);
-    useEffect(() => {
-      const sample = rowData?.[0];
-      if (!sample || sampleRowRef.current) return;
-      sampleRowRef.current = sample;
-      setSampleRevision((n) => n + 1);
-    }, [rowData]);
+    // Sample for type inference — capture ONCE. Depending on live
+    // `rowData[0]` identity reconfigures on every calc-materialize pass
+    // (new row objects) and cancels in-flight setRowData → permanent ERR.
+    // Warm CSRM→SSRM switches already have rowData: seed version=1 so we
+    // don't setState→re-render→second configureAndLoad on mount.
+    const sampleRowRef = useRef<Record<string, unknown> | undefined>(
+      rowData?.[0],
+    );
+    const [sampleVersion, setSampleVersion] = useState(() =>
+      rowData?.[0] ? 1 : 0,
+    );
+    if (rowData?.[0] && !sampleRowRef.current) {
+      sampleRowRef.current = rowData[0];
+    }
+    if (sampleRowRef.current && sampleVersion === 0) {
+      setSampleVersion(1);
+    }
 
     const rowDataRef = useRef(rowData);
     rowDataRef.current = rowData;
@@ -294,7 +321,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           sampleRow: sampleRowRef.current,
           getFilterValues,
         }),
-      [columnDefs, idField, getFilterValues, sampleRevision],
+      [columnDefs, idField, getFilterValues, sampleVersion],
     );
     const schemaRef = useRef(override.schema);
     schemaRef.current = override.schema;
@@ -449,6 +476,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
             absSort: absSortRef.current || undefined,
             refreshGeneration: refreshGenerationRef.current,
             includeGrandTotal: usesNativeGrandTotal(grandTotalRowRef.current),
+            isConfigured: configuredRef.current,
           }),
           (totals, filteredRowCount, aggregates) => {
             const api = apiRef.current;
@@ -486,7 +514,8 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         // configureAndLoad owns the first refresh after setRowData; applying a
         // dirty purge mid-configure bumps refreshGeneration and abandons the
         // in-flight getRows → permanent Loading overlay.
-        if (!configuredRef.current) return;
+        // Chunked ingest also emits dirty per updateRows batch — ignore those.
+        if (!configuredRef.current || ingestingRef.current) return;
         const api = apiRef.current;
         if (!api) return;
         const mode = applyWorkerDirtyToGrid(msg, {
@@ -517,22 +546,103 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       }, props.refreshThrottleMs ?? 150);
     }, [props.refreshThrottleMs]);
 
+    const countMatching = useCallback(
+      async (filterModel: Record<string, unknown>): Promise<number> => {
+        const client = clientRef.current;
+        if (!client || !configuredRef.current) return 0;
+        const result = await client.getAggregates({
+          dataset: DATASET,
+          valueCols: [],
+          filterModel,
+        });
+        return result.rowCount;
+      },
+      [],
+    );
+
     // Configure the dataset (schema/index) + load the initial snapshot.
+    // Generation token drops superseded runs when sampleRow arrives mid-flight
+    // (cold mount often starts with rowData=[] then jumps to the full book).
+    const configureGenRef = useRef(0);
     const configureAndLoad = useCallback(async () => {
       const client = clientRef.current;
       if (!client) return;
-      await client.configure(feedConfigRef.current);
-      const rows = rowDataRef.current;
-      if (rows && rows.length > 0) {
-        await client.setRowData(DATASET, rows);
+      // Wait for a schema sample — configuring from an empty book then
+      // reconfiguring when data arrives races the worker and surfaces as ERR.
+      if (!sampleRowRef.current && !(rowDataRef.current?.length)) {
+        return;
       }
-      configuredRef.current = true;
-      if (gridReadyRef.current && apiRef.current) {
-        purgeRefreshStores({ bumpGeneration: false });
-      }
-    }, [purgeRefreshStores]);
+      const gen = ++configureGenRef.current;
+      configuredRef.current = false;
+      configureInFlightRef.current = true;
+      try {
+        await client.configure(feedConfigRef.current);
+        if (gen !== configureGenRef.current) return;
 
-    // Re-configure when the schema/config changes.
+        const rows = rowDataRef.current;
+        if (rows && rows.length > 0) {
+          const keys = schemaKeysFromFeed(
+            feedConfigRef.current.schema,
+            feedConfigRef.current.index,
+          );
+          const projected = projectRowsForSchema(rows, keys);
+          const chunks = chunkRows(projected);
+          ingestingRef.current = true;
+          try {
+            // Chunked postMessage keeps the main thread responsive; one grid
+            // purge at the end avoids the CSRM→SSRM "loads twice" flash.
+            await client.setRowData(DATASET, chunks[0] ?? []);
+            if (gen !== configureGenRef.current) return;
+
+            for (let i = 1; i < chunks.length; i++) {
+              if (gen !== configureGenRef.current) return;
+              await client.updateRows(DATASET, chunks[i]!);
+            }
+          } finally {
+            if (gen === configureGenRef.current) ingestingRef.current = false;
+          }
+        }
+
+        if (gen !== configureGenRef.current) return;
+        configuredRef.current = true;
+        if (apiRef.current) {
+          const api = apiRef.current;
+          const prev =
+            (api.getGridOption("context") as Record<string, unknown> | undefined) ??
+            {};
+          api.setGridOption("context", {
+            ...prev,
+            ssrmConfigured: true,
+            ssrmCountMatching: countMatching,
+          });
+        }
+
+        if (gridReadyRef.current && apiRef.current) {
+          purgeRefreshStores({ bumpGeneration: false });
+          const api = apiRef.current;
+          // Defer set-filter value refresh so it does not contend with first getRows.
+          window.setTimeout(() => {
+            if (gen !== configureGenRef.current || !apiRef.current) return;
+            for (const col of api.getColumns() ?? []) {
+              const handler = api.getColumnFilterHandler?.(col.getColId()) as
+                | { refreshFilterValues?: () => void }
+                | undefined;
+              handler?.refreshFilterValues?.();
+            }
+            api.dispatchEvent({ type: "ssrmConfigured" } as never);
+          }, 0);
+        }
+      } catch (err) {
+        if (gen !== configureGenRef.current) return;
+        ingestingRef.current = false;
+        // Leave configuredRef false so a later rowData/sample retry can run.
+        console.error("[SSRMGrid] configureAndLoad failed", err);
+      } finally {
+        if (gen === configureGenRef.current) configureInFlightRef.current = false;
+      }
+    }, [purgeRefreshStores, countMatching]);
+
+    // Re-configure when the schema/config changes (including first sample).
     useEffect(() => {
       if (clientRef.current) void configureAndLoad();
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -566,17 +676,21 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       };
     }, [props.quickFilterText, props.absSort]);
 
-    // Push a new rowData snapshot when it changes after configure.
-    const firstRowData = useRef(true);
+    // Push rowData snapshots into the worker after configure.
+    // Do not skip the first emission — configureAndLoad often races ahead
+    // of async hub snapshot assembly (empty → full), and the first effect
+    // pass would otherwise drop the real book.
     useEffect(() => {
-      if (firstRowData.current) {
-        firstRowData.current = false;
-        return; // initial load handled by configureAndLoad
-      }
       const client = clientRef.current;
-      if (!client || !configuredRef.current) return;
+      if (!client || !configuredRef.current || ingestingRef.current) return;
+      const rows = rowData ?? [];
+      const keys = schemaKeysFromFeed(
+        feedConfigRef.current.schema,
+        feedConfigRef.current.index,
+      );
+      const projected = projectRowsForSchema(rows, keys);
       // Worker emits `dirty` → purge refresh; no local .then refresh.
-      void client.setRowData(DATASET, rowData ?? []);
+      void client.setRowData(DATASET, projected);
     }, [rowData]);
 
     // Normalize a transaction's `remove` to id list (id field or object).
@@ -649,8 +763,9 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           apiRef.current?.setServerSideSelectionState(state);
         },
         chartFilteredData: (opts) => handleChartAll(opts),
+        countMatching,
       }),
-      [commit, handleChartAll],
+      [commit, handleChartAll, countMatching],
     );
 
     const getRowIdCb = useCallback(
@@ -950,9 +1065,20 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           onGridReady={(e) => {
             apiRef.current = e.api;
             gridReadyRef.current = true;
-            if (!configuredRef.current) void configureAndLoad();
-            else {
-              purgeRefreshStores({ bumpGeneration: false });
+            e.api.setGridOption("context", {
+              ...(e.api.getGridOption("context") as object | undefined),
+              ssrmCountMatching: countMatching,
+              ssrmConfigured: configuredRef.current,
+            });
+            // feedConfig effect already owns configureAndLoad. Re-entering here
+            // (or purging again after it finishes) is what made CSRM→SSRM
+            // appear to load/refresh twice.
+            if (
+              !configuredRef.current &&
+              !configureInFlightRef.current &&
+              !ingestingRef.current
+            ) {
+              void configureAndLoad();
             }
             props.onGridReady?.(e);
           }}

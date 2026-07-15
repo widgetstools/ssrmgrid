@@ -124,8 +124,10 @@ function orExpressionPlan(
 }
 
 /**
- * Server-side quick filter: OR of case-insensitive contains across text columns.
- * Implemented as a Perspective expression so the engine filters before slice.
+ * Server-side quick filter: case-insensitive contains across text columns.
+ * OR of per-column match(lower(...)) — Perspective 3.8 rejects lower(concat(...))
+ * in practice (SSRM fail/"ERR"); narrowing columns via getQuickFilterColumns is
+ * the primary query-cost win.
  */
 export function quickFilterToPlan(
   text: string | null | undefined,

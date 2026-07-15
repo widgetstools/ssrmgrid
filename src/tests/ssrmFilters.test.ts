@@ -183,11 +183,13 @@ describe("mapFilterModel", () => {
 });
 
 describe("quickFilterToPlan", () => {
-  it("builds an OR contains expression across text columns", () => {
+  it("builds an OR of case-insensitive contains across text columns", () => {
     const plan = quickFilterToPlan("usd", ["desk", "currency", "ticker"]);
     expect(plan.filters).toEqual([["__ssrm_quick_filter", "==", true]]);
-    expect(plan.expressions?.__ssrm_quick_filter).toContain("desk");
-    expect(plan.expressions?.__ssrm_quick_filter).toContain("currency");
+    const expr = plan.expressions?.__ssrm_quick_filter ?? "";
+    expect(expr).toContain('match(lower(string("desk"))');
+    expect(expr).toContain('match(lower(string("currency"))');
+    expect(expr).toContain(" or ");
   });
 
   it("returns empty plan for blank quick filter", () => {
