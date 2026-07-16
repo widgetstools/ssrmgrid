@@ -7,8 +7,18 @@ import {
 
 import { getActiveFilterModel } from "./activeFilterModel";
 import { resolveAggFuncName } from "./compileColExpression";
-import type { DatasetId } from "./types";
+import type {
+  DatasetId,
+  SeriesDataRequest,
+  SeriesDataResult,
+} from "./types";
 import type { createWorkerClient } from "./workerClient";
+
+export type ChartSeriesClient = {
+  getSeriesData(
+    request: SeriesDataRequest,
+  ): Promise<SeriesDataResult> | SeriesDataResult;
+};
 
 function readValueCols(api: GridApi): {
   id: string;
@@ -57,7 +67,7 @@ export function resolveChartCategoryField(
  */
 export async function chartAllViaAgGrid(options: {
   liveApi: GridApi;
-  client: ReturnType<typeof createWorkerClient>;
+  client: ChartSeriesClient | ReturnType<typeof createWorkerClient>;
   dataset: DatasetId;
   categoryField?: string;
   chartType?: ChartType;
@@ -108,16 +118,18 @@ export async function chartAllViaAgGrid(options: {
   }
 
   const filterModel = getActiveFilterModel(liveApi);
-  const { rowData, rowCount } = await client.getSeriesData({
-    dataset,
-    categoryField,
-    valueCols,
-    filterModel,
-    quickFilterText,
-    quickFilterFields,
-    rowKeepExpression,
-    limit,
-  });
+  const { rowData, rowCount } = await Promise.resolve(
+    client.getSeriesData({
+      dataset,
+      categoryField,
+      valueCols,
+      filterModel,
+      quickFilterText,
+      quickFilterFields,
+      rowKeepExpression,
+      limit,
+    }),
+  );
 
   if (rowData.length === 0) {
     return { rowCount: 0 };

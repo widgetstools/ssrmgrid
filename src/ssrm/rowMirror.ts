@@ -10,6 +10,7 @@ import {
   aggregateMirrorTotals,
   type MirrorValueCol,
 } from "./mirrorGroupAgg";
+import { compileKeepPredicate } from "./engine/materializeCalcColumns";
 
 export type MirrorGetRowsRequest = {
   startRow: number;
@@ -18,13 +19,15 @@ export type MirrorGetRowsRequest = {
   groupKeys: string[];
   pivotMode: boolean;
   filterModel: Record<string, unknown>;
-  sortModel: { colId: string; sort: string }[];
+  sortModel: { colId: string; sort: string; abs?: boolean }[];
   valueCols?: MirrorValueCol[];
   quickFilterText?: string;
   quickFilterFields?: string[];
   treeData?: boolean;
   absSort?: boolean;
   rowKeepExpression?: string;
+  /** Primary key — used to shape tree leaf `__treeKey`. */
+  idField?: string;
 };
 
 export type MirrorSlice = {
@@ -136,6 +139,11 @@ export class RowMirror {
     this.viewRootRollup = null;
   }
 
+  /** Snapshot of all leaf rows (custom engine set-filter / diagnostics). */
+  getAllRows(): Record<string, unknown>[] {
+    return this.all;
+  }
+
   /**
    * Leaf at a root-store index for stub/loading cells.
    * Only valid for flat (ungrouped) root stores.
@@ -147,13 +155,12 @@ export class RowMirror {
   }
 
   /**
-   * Sync flat / leaf / group-header slice, or null when this request must go
-   * to the worker (pivot, unsafe filters, abs sort, rowKeep, tree).
+   * Sync flat / leaf / group-header / tree slice, or null when unsupported
+   * (pivot or filters that need Perspective expression columns).
    */
   tryGetRows(req: MirrorGetRowsRequest): MirrorSlice | null {
     if (!this.ready || this.all.length === 0) return null;
-    if (req.pivotMode || req.treeData || req.absSort) return null;
-    if (req.rowKeepExpression) return null;
+    if (req.pivotMode) return null;
 
     const plan = mapFilterModel(req.filterModel);
     if (!filterPlanIsMainThreadSafe(plan)) return null;
@@ -162,9 +169,10 @@ export class RowMirror {
     const groupKeys = req.groupKeys ?? [];
     const isGroupHeader =
       rowGroupCols.length > 0 && groupKeys.length < rowGroupCols.length;
+    const treeData = Boolean(req.treeData);
 
     const key = JSON.stringify({
-      kind: isGroupHeader ? "group" : "leaf",
+      kind: isGroupHeader ? (treeData ? "tree-group" : "group") : treeData ? "tree-leaf" : "leaf",
       g: groupKeys,
       rg: rowGroupCols.map((c) => c.field),
       f: req.filterModel,
@@ -172,6 +180,9 @@ export class RowMirror {
       v: (req.valueCols ?? []).map((c) => `${c.field}:${c.aggFunc}`),
       q: req.quickFilterText ?? "",
       qf: req.quickFilterFields ?? null,
+      k: req.rowKeepExpression ?? "",
+      abs: Boolean(req.absSort),
+      tree: treeData,
     });
     if (key !== this.viewKey) {
       const leaves = this.filterLeaves(req, plan);
@@ -179,18 +190,40 @@ export class RowMirror {
       if (isGroupHeader) {
         const groupField = rowGroupCols[groupKeys.length]?.field;
         if (!groupField) return null;
-        this.view = aggregateMirrorGroupRows(
+        let groups = aggregateMirrorGroupRows(
           leaves,
           groupField,
           req.valueCols ?? [],
           req.sortModel ?? [],
         );
+        if (treeData) {
+          groups = groups.map((row) => ({
+            ...row,
+            group: true,
+            __treeKey: String(row.__ssrmGroupKey ?? ""),
+            __treeLabel: row[groupField],
+          }));
+        }
+        this.view = groups;
       } else {
-        this.view = this.sortLeaves(leaves, req.sortModel ?? []);
+        let sorted = this.sortLeaves(
+          leaves,
+          req.sortModel ?? [],
+          Boolean(req.absSort),
+        );
+        if (treeData) {
+          const pk = req.idField ?? this.idField;
+          sorted = sorted.map((row) => ({
+            ...row,
+            group: false,
+            __treeKey: String(row[pk] ?? ""),
+            __treeLabel: row[pk],
+          }));
+        }
+        this.view = sorted;
       }
       this.viewKey = key;
       this.viewRootRollup = null;
-      // Root rollup once per view shape — not on every block getRows.
       if (groupKeys.length === 0 && (req.valueCols?.length ?? 0) > 0) {
         const { totals, aggregates } = aggregateMirrorTotals(
           leaves,
@@ -206,8 +239,20 @@ export class RowMirror {
 
     const start = Math.max(0, req.startRow);
     const end = Math.max(start, req.endRow);
+    let rowData = this.view.slice(start, end);
+    // Stamp filtered aggregates for shareOfTotal formatters on loaded rows.
+    if (this.viewRootRollup?.aggregates && groupKeys.length === 0) {
+      const aggs = this.viewRootRollup.aggregates;
+      const sums = this.viewRootRollup.totals;
+      rowData = rowData.map((r) => ({
+        ...r,
+        __ssrm_aggs: aggs,
+        __ssrm_sums: sums,
+      }));
+    }
+
     const slice: MirrorSlice = {
-      rowData: this.view.slice(start, end),
+      rowData,
       rowCount: this.view.length,
     };
 
@@ -256,12 +301,16 @@ export class RowMirror {
     }
 
     const qFields = req.quickFilterFields;
+    const keep = req.rowKeepExpression?.trim()
+      ? compileKeepPredicate(req.rowKeepExpression)
+      : null;
 
     return this.all.filter((row) => {
       for (const f of ancestorFilters) {
         if (!rowMatchesFilterPlan({ filters: [f] }, row)) return false;
       }
       if (!rowMatchesFilterPlan(plan, row)) return false;
+      if (keep && !keep(row)) return false;
       const fields =
         qFields && qFields.length > 0
           ? qFields
@@ -273,14 +322,30 @@ export class RowMirror {
 
   private sortLeaves(
     rows: Record<string, unknown>[],
-    sortModel: { colId: string; sort: string }[],
+    sortModel: { colId: string; sort: string; abs?: boolean }[],
+    absSortAll = false,
   ): Record<string, unknown>[] {
     if (sortModel.length === 0) return rows;
     return [...rows].sort((a, b) => {
       for (const s of sortModel) {
         const field = s.colId;
-        const av = a[field];
-        const bv = b[field];
+        const useAbs = absSortAll || Boolean(s.abs);
+        let av = a[field];
+        let bv = b[field];
+        if (useAbs) {
+          av =
+            typeof av === "number"
+              ? Math.abs(av)
+              : av == null
+                ? null
+                : Math.abs(Number(av));
+          bv =
+            typeof bv === "number"
+              ? Math.abs(bv)
+              : bv == null
+                ? null
+                : Math.abs(Number(bv));
+        }
         if (av == null && bv == null) continue;
         if (av == null) return 1;
         if (bv == null) return -1;

@@ -13,6 +13,20 @@ query engine). Three consequences shape the gap list:
    doesFilterPass) must become a Perspective expression / named aggregate, or use
    the handle escape hatches below.
 
+## Two engines (pick one component)
+
+| Component | Engine | When to use |
+|---|---|---|
+| **`<SSRMGrid>`** | Perspective worker (`createPerspectiveEngine`) | Very large books, **pivot**, full Perspective calc DSL |
+| **`<CustomSSRMGrid>`** | Main-thread RowMirror (`createCustomEngine`) — **no Perspective** | Tick/scroll-sensitive blotters; MarketsGrid mid-size books |
+
+Shared contract: `SsrmEngine` (`src/ssrm/engine/`).
+
+**CustomSSRMGrid supports (P0–P2):** row grouping, named/`trafficLight` aggs,
+quick/set filters, `rowKeepExpression`, richer calc materialize (`if`/`IFS`/`SUM`),
+`__ssrm_aggs` for `shareOfTotal`, export-all, chart-all, `absSort`, tree data,
+master/detail, floating filters, cell selection. **Not supported: pivot.**
+
 Legend: ✅ works · 🟡 opt-in / approximate · 🔴 fundamentally not possible in SSRM —
 use the Perspective equivalent. (v) = verified live. Targets **AG Grid 36**.
 

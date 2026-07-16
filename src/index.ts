@@ -6,6 +6,11 @@ export type {
   GrandTotalRowMode,
   GroupTotalRowMode,
 } from './ssrmgrid/SSRMGrid';
+export { CustomSSRMGrid } from './ssrmgrid/CustomSSRMGrid';
+export type {
+  CustomSSRMGridHandle,
+  CustomSSRMGridProps,
+} from './ssrmgrid/CustomSSRMGrid';
 export type { SSRMColDef } from './ssrmgrid/columnOverride';
 export type { DirtyMessage } from './ssrm/applyWorkerDirtyToGrid';
 export {
@@ -33,3 +38,9 @@ export {
   resolveAggFuncName,
 } from './ssrm/compileColExpression';
 export type { QueryAllRequest, QueryAllResult } from './ssrm/types';
+export {
+  createCustomEngine,
+  createPerspectiveEngine,
+  materializeCalcColumns,
+} from './ssrm/engine';
+export type { SsrmEngine, SsrmEngineKind } from './ssrm/engine';

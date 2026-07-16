@@ -5,10 +5,17 @@ import {
 } from "ag-grid-community";
 
 import type { createWorkerClient } from "./workerClient";
-import type { DatasetId } from "./types";
+import type { DatasetId, QueryAllRequest, QueryAllResult } from "./types";
 import { buildQueryAllRequestFromApi } from "./readGridQueryState";
 
 export type ExportFormat = "excel" | "csv";
+
+/** Minimal client surface for export-all (Perspective worker or CustomEngine). */
+export type ExportQueryClient = {
+  queryAll(
+    request: QueryAllRequest,
+  ): Promise<QueryAllResult> | QueryAllResult;
+};
 
 /** Visible, field-backed columns from the live SSRM grid (export schema). */
 export function getExportColumnDefs(api: GridApi): ColDef[] {
@@ -25,13 +32,13 @@ export function getExportColumnDefs(api: GridApi): ColDef[] {
 }
 
 /**
- * Fetch the full filtered set from Perspective (`queryAll`), including current
- * group/pivot structure when active, then use a short-lived CSRM grid so AG
- * Grid's Excel/CSV exporters own the file format.
+ * Fetch the full filtered set via `queryAll`, including current group/pivot
+ * structure when active, then use a short-lived CSRM grid so AG Grid's
+ * Excel/CSV exporters own the file format.
  */
 export async function exportAllViaAgGrid(options: {
   liveApi: GridApi;
-  client: ReturnType<typeof createWorkerClient>;
+  client: ExportQueryClient | ReturnType<typeof createWorkerClient>;
   dataset: DatasetId;
   format: ExportFormat;
   fileName?: string;
@@ -56,16 +63,18 @@ export async function exportAllViaAgGrid(options: {
   } = options;
   const columnDefs = getExportColumnDefs(liveApi);
 
-  const { rowData, rowCount } = await client.queryAll(
-    buildQueryAllRequestFromApi(liveApi, {
-      dataset,
-      limit,
-      quickFilterText,
-      quickFilterFields,
-      rowKeepExpression,
-      treeData,
-      absSort,
-    }),
+  const { rowData, rowCount } = await Promise.resolve(
+    client.queryAll(
+      buildQueryAllRequestFromApi(liveApi, {
+        dataset,
+        limit,
+        quickFilterText,
+        quickFilterFields,
+        rowKeepExpression,
+        treeData,
+        absSort,
+      }),
+    ),
   );
 
   const host = document.createElement("div");
