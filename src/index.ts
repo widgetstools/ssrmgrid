@@ -23,3 +23,13 @@ export {
   toGroupLeafCols,
 } from './ssrm/getGroupLeafRows';
 export type { GroupLeafRowGroupCol } from './ssrm/getGroupLeafRows';
+export {
+  compileExpression,
+  compileEditableExpression,
+  compileCellStyleExpression,
+  compileCellClassRuleExpression,
+  tryValueGetterToPerspective,
+  tryCalculatedExpressionToPerspective,
+  resolveAggFuncName,
+} from './ssrm/compileColExpression';
+export type { QueryAllRequest, QueryAllResult } from './ssrm/types';

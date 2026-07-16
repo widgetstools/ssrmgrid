@@ -1,5 +1,14 @@
 import type { ColDef, ColGroupDef } from "ag-grid-community";
 import type { PerspectiveColumnType } from "../ssrm/types";
+import {
+  compileCellClassRuleExpression,
+  compileCellStyleExpression,
+  compileEditableExpression,
+  compileExpression,
+  resolveAggFuncName,
+  tryCalculatedExpressionToPerspective,
+  tryValueGetterToPerspective,
+} from "../ssrm/compileColExpression";
 
 /**
  * A consumer ColDef, extended with the two SSRM-specific knobs. Everything else
@@ -16,6 +25,13 @@ export interface SSRMColDef extends ColDef {
   perspectiveType?: PerspectiveColumnType;
   /** Column-group children — walked for Perspective schema extraction. */
   children?: SSRMColDef[];
+  /**
+   * String bodies accepted for CSRM-style tooling (compiled to functions for
+   * loaded-row presentation). Prefer functions when authoring ColDefs directly.
+   */
+  editable?: ColDef["editable"] | string;
+  cellStyle?: ColDef["cellStyle"] | string;
+  valueGetter?: ColDef["valueGetter"] | string;
 }
 
 export interface ColumnOverrideResult {
@@ -73,6 +89,60 @@ function isColGroup(
   return Array.isArray(def.children) && def.children.length > 0;
 }
 
+function normalizePresentationExprs(agDef: ColDef): void {
+  if (typeof agDef.editable === "string") {
+    agDef.editable = compileEditableExpression(agDef.editable) as ColDef["editable"];
+  }
+
+  if (typeof agDef.cellStyle === "string") {
+    agDef.cellStyle = compileCellStyleExpression(
+      agDef.cellStyle,
+    ) as ColDef["cellStyle"];
+  }
+
+  if (agDef.cellClassRules && typeof agDef.cellClassRules === "object") {
+    const rules = { ...agDef.cellClassRules };
+    let changed = false;
+    for (const [cls, rule] of Object.entries(rules)) {
+      if (typeof rule === "string") {
+        rules[cls] = compileCellClassRuleExpression(rule);
+        changed = true;
+      }
+    }
+    if (changed) agDef.cellClassRules = rules;
+  }
+
+  if (typeof agDef.valueGetter === "string") {
+    const body = agDef.valueGetter;
+    agDef.valueGetter = compileExpression(body) as ColDef["valueGetter"];
+  }
+
+  if (agDef.aggFunc != null && typeof agDef.aggFunc !== "string") {
+    agDef.aggFunc = resolveAggFuncName(agDef.aggFunc);
+  }
+}
+
+function resolvePerspectiveExpression(def: SSRMColDef): string | undefined {
+  if (def.perspectiveExpression) return def.perspectiveExpression;
+
+  if (typeof def.valueGetter === "string") {
+    const fromGetter = tryValueGetterToPerspective(def.valueGetter);
+    if (fromGetter) return fromGetter;
+  }
+
+  const calcExpr =
+    typeof (def as { calculatedExpression?: unknown }).calculatedExpression ===
+    "string"
+      ? (def as { calculatedExpression: string }).calculatedExpression
+      : undefined;
+  if (calcExpr) {
+    const fromCalc = tryCalculatedExpressionToPerspective(calcExpr);
+    if (fromCalc) return fromCalc;
+  }
+
+  return undefined;
+}
+
 /**
  * Turn the consumer's columnDefs into (a) a Perspective schema + calc expressions
  * for the worker, and (b) the ColDefs the inner ag-grid gets. Pure and testable.
@@ -100,6 +170,7 @@ export function buildColumnOverride(
     // Strip our two custom keys before handing the def to ag-grid.
     const { perspectiveExpression, perspectiveType, children, ...rest } = def;
     void perspectiveType;
+    void perspectiveExpression;
 
     if (children?.length) {
       return {
@@ -108,11 +179,20 @@ export function buildColumnOverride(
       } as ColDef;
     }
 
-    const field = def.field;
+    const field = def.field ?? (typeof def.colId === "string" ? def.colId : undefined);
     const agDef: ColDef = { ...rest };
+    normalizePresentationExprs(agDef);
 
-    if (field && perspectiveExpression) {
-      calcExpressions[field] = perspectiveExpression;
+    const serverExpr = resolvePerspectiveExpression(def);
+    if (field && serverExpr) {
+      calcExpressions[field] = serverExpr;
+      // Perspective owns the value for group/agg/sort/filter — drop client
+      // recompute sources so AG Grid displays the server-provided field.
+      if (!agDef.field) agDef.field = field;
+      delete (agDef as { calculatedExpression?: string }).calculatedExpression;
+      if (typeof def.valueGetter === "string") {
+        delete agDef.valueGetter;
+      }
     } else if (field) {
       schema[field] = resolveType(def, sample[field]);
     }

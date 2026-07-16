@@ -50,7 +50,7 @@ import {
   patchLoadedGroupAggregatesFromMirror,
 } from "../ssrm/patchLoadedGroupAggregates";
 import { SsrmBlockCache } from "../ssrm/ssrmBlockCache";
-import type { FeedConfig } from "../ssrm/types";
+import type { FeedConfig, QueryAllRequest, QueryAllResult } from "../ssrm/types";
 import { createWorkerClient } from "../ssrm/workerClient";
 import {
   chunkRows,
@@ -58,6 +58,8 @@ import {
   schemaKeysFromFeed,
 } from "../ssrm/ingestRows";
 import { fetchAllGroupLeafRows, toGroupLeafCols } from "../ssrm/getGroupLeafRows";
+import { buildQueryAllRequestFromApi } from "../ssrm/readGridQueryState";
+import { resolveAggFuncName } from "../ssrm/compileColExpression";
 import { PIVOT_FIELD_SEPARATOR } from "../workers/ssrmQueryEngine";
 import { foldTrafficLight } from "../ssrm/trafficLightAgg";
 import { buildColumnOverride, type SSRMColDef } from "./columnOverride";
@@ -157,6 +159,21 @@ export interface SSRMGridHandle {
     filterModel?: Record<string, unknown>;
     quickFilterText?: string;
   }): Promise<Record<string, unknown>[]>;
+  /**
+   * CSRM-shaped full-set fetch via Perspective (`queryAll`). Defaults inherit
+   * the live grid filter/sort/structure. Pass `limit: null` for uncapped.
+   */
+  queryAll(
+    opts?: Partial<Omit<QueryAllRequest, "dataset">>,
+  ): Promise<QueryAllResult>;
+  /**
+   * CSRM `forEachNode`-over-all approximation: walk every matching leaf from
+   * Perspective (not AG Grid's in-memory nodes). Returns the walked rowCount.
+   */
+  forEachMatching(
+    callback: (data: Record<string, unknown>, index: number) => void,
+    opts?: Partial<Omit<QueryAllRequest, "dataset">>,
+  ): Promise<{ rowCount: number }>;
 }
 
 export interface SSRMGridProps {
@@ -303,6 +320,13 @@ export interface SSRMGridProps {
   };
   /** Tree data: hierarchy fields (outer -> inner); leaf rows drill under them. */
   treeFields?: string[];
+  /**
+   * Enable AG Grid calculated columns (`calculatedExpression` on ColDefs).
+   * Default **true**. Same-row refs work on loaded SSRM rows; for
+   * group/agg/sort/filter over the full book, prefer `perspectiveExpression`
+   * (or a mappable `calculatedExpression` / string `valueGetter`).
+   */
+  calculatedColumns?: boolean;
 }
 
 function coerceEdited(
@@ -510,7 +534,9 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           return {
             id: col.getColId(),
             field: def.field ?? col.getColId(),
-            aggFunc: String(col.getAggFunc?.() ?? def.aggFunc ?? "sum"),
+            aggFunc: resolveAggFuncName(
+              col.getAggFunc?.() ?? def.aggFunc ?? "sum",
+            ),
           };
         });
         if (valueCols.length === 0) return;
@@ -813,6 +839,75 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
       [],
     );
 
+    const queryAll = useCallback(
+      async (
+        opts: Partial<Omit<QueryAllRequest, "dataset">> = {},
+      ): Promise<QueryAllResult> => {
+        const client = clientRef.current;
+        const api = apiRef.current;
+        if (!client || !configuredRef.current) {
+          return { rowData: [], rowCount: 0 };
+        }
+        if (!api) {
+          return client.queryAll({
+            dataset: DATASET,
+            filterModel: opts.filterModel ?? {},
+            sortModel: opts.sortModel ?? [],
+            limit: opts.limit ?? 50_000,
+            quickFilterText:
+              opts.quickFilterText ?? (quickFilterRef.current || undefined),
+            quickFilterFields:
+              opts.quickFilterFields ?? quickFilterFieldsRef.current,
+            rowKeepExpression:
+              opts.rowKeepExpression ??
+              (rowKeepExpressionRef.current || undefined),
+            includeStructure: opts.includeStructure ?? false,
+            rowGroupCols: opts.rowGroupCols,
+            valueCols: opts.valueCols,
+            pivotCols: opts.pivotCols,
+            pivotMode: opts.pivotMode,
+            groupKeys: opts.groupKeys ?? [],
+            treeData: opts.treeData ?? treeData,
+            absSort: opts.absSort ?? absSortRef.current,
+          });
+        }
+        return client.queryAll(
+          buildQueryAllRequestFromApi(
+            api,
+            {
+              dataset: DATASET,
+              quickFilterText: quickFilterRef.current || undefined,
+              quickFilterFields: quickFilterFieldsRef.current,
+              rowKeepExpression: rowKeepExpressionRef.current || undefined,
+              treeData,
+              absSort: absSortRef.current,
+              limit: 50_000,
+            },
+            opts,
+          ),
+        );
+      },
+      [treeData],
+    );
+
+    const forEachMatching = useCallback(
+      async (
+        callback: (data: Record<string, unknown>, index: number) => void,
+        opts?: Partial<Omit<QueryAllRequest, "dataset">>,
+      ): Promise<{ rowCount: number }> => {
+        const { rowData, rowCount } = await queryAll({
+          ...opts,
+          // forEachNode-over-all is leaf-oriented unless caller opts into structure.
+          includeStructure: opts?.includeStructure ?? false,
+        });
+        for (let i = 0; i < rowData.length; i++) {
+          callback(rowData[i]!, i);
+        }
+        return { rowCount };
+      },
+      [queryAll],
+    );
+
     // Configure the dataset (schema/index) + load the initial snapshot.
     // Generation token drops superseded runs when sampleRow arrives mid-flight
     // (cold mount often starts with rowData=[] then jumps to the full book).
@@ -1058,8 +1153,17 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
         chartFilteredData: (opts) => handleChartAll(opts),
         countMatching,
         getGroupLeafRows,
+        queryAll,
+        forEachMatching,
       }),
-      [commit, handleChartAll, countMatching, getGroupLeafRows],
+      [
+        commit,
+        handleChartAll,
+        countMatching,
+        getGroupLeafRows,
+        queryAll,
+        forEachMatching,
+      ],
     );
 
     const getRowIdCb = useCallback(
@@ -1393,6 +1497,7 @@ export const SSRMGrid = forwardRef<SSRMGridHandle, SSRMGridProps>(
           paginationPageSize={props.paginationPageSize ?? 100}
           enableAdvancedFilter={props.advancedFilter}
           enableCharts={props.enableCharts}
+          calculatedColumns={props.calculatedColumns !== false}
           grandTotalRow={grandTotalRowOpt}
           groupTotalRow={props.groupTotalRow}
           pinnedTopRowData={props.pinnedTopRowData}

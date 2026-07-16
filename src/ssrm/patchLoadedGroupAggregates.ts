@@ -7,6 +7,7 @@ import {
 
 import type { MirrorValueCol } from "./mirrorGroupAgg";
 import type { RowMirror } from "./rowMirror";
+import { resolveAggFuncName } from "./compileColExpression";
 
 function readValueCols(api: GridApi): MirrorValueCol[] {
   const cols = api.getValueColumns?.() ?? [];
@@ -15,7 +16,7 @@ function readValueCols(api: GridApi): MirrorValueCol[] {
     return {
       id: col.getColId(),
       field: def.field ?? col.getColId(),
-      aggFunc: String(col.getAggFunc?.() ?? def.aggFunc ?? "sum"),
+      aggFunc: resolveAggFuncName(col.getAggFunc?.() ?? def.aggFunc ?? "sum"),
     };
   });
 }

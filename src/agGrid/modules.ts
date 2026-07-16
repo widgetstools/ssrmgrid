@@ -34,6 +34,7 @@ import {
   StatusBarModule,
   TreeDataModule,
   IntegratedChartsModule,
+  CalculatedColumnsModule,
   LicenseManager,
 } from "ag-grid-enterprise";
 import { AgChartsEnterpriseModule } from "ag-charts-enterprise";
@@ -46,6 +47,7 @@ ModuleRegistry.registerModules([
   RowGroupingPanelModule,
   PivotModule,
   TreeDataModule,
+  CalculatedColumnsModule,
   IntegratedChartsModule.with(AgChartsEnterpriseModule),
   ColumnsToolPanelModule,
   FiltersToolPanelModule,

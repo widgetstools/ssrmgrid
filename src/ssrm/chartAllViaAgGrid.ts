@@ -6,6 +6,7 @@ import {
 } from "ag-grid-community";
 
 import { getActiveFilterModel } from "./activeFilterModel";
+import { resolveAggFuncName } from "./compileColExpression";
 import type { DatasetId } from "./types";
 import type { createWorkerClient } from "./workerClient";
 
@@ -19,7 +20,7 @@ function readValueCols(api: GridApi): {
     return {
       id: col.getColId(),
       field: def.field ?? col.getColId(),
-      aggFunc: String(col.getAggFunc?.() ?? def.aggFunc ?? "sum"),
+      aggFunc: resolveAggFuncName(col.getAggFunc?.() ?? def.aggFunc ?? "sum"),
     };
   });
 }
@@ -97,7 +98,7 @@ export async function chartAllViaAgGrid(options: {
         return {
           id: col.getColId(),
           field,
-          aggFunc: String(def.aggFunc ?? "sum"),
+          aggFunc: resolveAggFuncName(def.aggFunc ?? "sum"),
         };
       })
       .filter((c): c is NonNullable<typeof c> => c != null);
